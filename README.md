@@ -1,6 +1,6 @@
 # FitLog
 
-Diário de treino, composição corporal e alimentação com sugestões geradas por IA.
+Diário de treino e composição corporal, com ficha de treino gerada por IA e sugestão diária de macronutrientes calculada no próprio app (sem registro de alimentos).
 Stack: **Vite + React** (front-end) · **Supabase** (banco + autenticação) · **Netlify** (hospedagem + function de proxy da IA).
 
 ## Como está organizado
@@ -15,14 +15,20 @@ src/
   lib/
     supabaseClient.js    # cliente do Supabase (usa VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
     storage.js            # loadState/persistState -> tabela app_state no Postgres
-    claude.js              # chamadas de IA -> sempre via /.netlify/functions/claude-proxy
+    claude.js              # IA: classificar exercício (claude-proxy) e gerar a ficha (plan-background + tabela plan_jobs)
+    nutrition.js           # calculadora de calorias/macros (sem IA)
+    goals.js               # metas, explicações e opções do questionário
+    planStatus.js          # validade da ficha (data ou sessões cumpridas)
     debounce.js             # evita gravar no banco a cada tecla digitada
     analytics.js            # cálculos puros dos gráficos do Painel (séries, médias, volume, constância)
 netlify/
   functions/
-    claude-proxy.js    # guarda a ANTHROPIC_API_KEY no servidor e valida a sessão antes de chamar a Anthropic
+    claude-proxy.js      # chamadas curtas (classificar exercício)
+    plan-background.js   # gera a ficha de treino em segundo plano (até 15 min) e grava em plan_jobs
+  lib/                   # código compartilhado: login/e-mails autorizados, chamada à Anthropic, prompt da ficha
+tests/                   # testes (node tests/*.test.mjs)
 supabase/
-  schema.sql            # tabela app_state + Row Level Security (cada usuário só vê os próprios dados)
+  schema.sql            # tabelas app_state e plan_jobs + Row Level Security (cada usuário só vê os próprios dados)
 ```
 
 ## Passo a passo do deploy
@@ -58,6 +64,7 @@ supabase/
    | `VITE_SUPABASE_URL` | URL do seu projeto Supabase | sim (é público, tudo bem) |
    | `VITE_SUPABASE_ANON_KEY` | chave anon do Supabase | sim (é pública por design) |
    | `ANTHROPIC_API_KEY` | sua chave da API da Anthropic ([console.anthropic.com](https://console.anthropic.com)) | **não** — só a function usa |
+   | `ALLOWED_EMAILS` | seu e-mail (vários: separe por vírgula). **Recomendado**: só esses e-mails podem usar a IA | **não** |
    | `ANTHROPIC_MODEL` | opcional, padrão `claude-sonnet-5` (também funciona `claude-sonnet-5-5`) | **não** |
 
 4. Deploy. Pegue a URL gerada (ex. `https://fitlog-halysson.netlify.app`) e volte no Supabase para colocá-la em **Site URL** / **Redirect URLs** (passo 1.4), senão o link de login não redireciona de volta corretamente.
@@ -65,7 +72,7 @@ supabase/
 ### 4. Primeiro acesso
 
 1. Abra a URL do Netlify no celular ou no computador.
-2. Digite seu e-mail, clique em **Enviar link de acesso**, abra o e-mail e clique no link — isso te loga (sem senha).
+2. Digite seu e-mail, clique em **Enviar link de acesso**, abra o e-mail e clique no link — isso te loga (sem senha). Se o link abrir em outro navegador/app, digite no app o **código de 6 dígitos** que vem no mesmo e-mail (veja "Segurança").
 3. No celular (Android ou iPhone), use **Adicionar à tela de início** do navegador para instalar como app (PWA) — abre em tela cheia, como um app nativo.
 
 ## Rodando localmente (opcional, para testar antes de subir)
@@ -82,8 +89,14 @@ A Netlify Function (`claude-proxy.js`) só roda de verdade quando publicada no N
 ## Registro diário x Avaliação
 
 - **Registro (aba Registro):** peso, % de massa magra, % de gordura e **medidas corporais** (bíceps, peito, cintura, quadril, coxa, panturrilha) podem ser lançados no dia que você quiser. Isso só grava no banco: não chama a IA e não gera plano. Todos os campos são opcionais.
-- **Avaliação (aba Avaliação):** use ao mudar de meta ou de fase. Os campos vêm preenchidos com o seu último lançamento. Ao salvar, o plano é gerado de novo e o que você **alterou** no formulário também vira lançamento do dia (o que veio pré-preenchido e não foi mexido não vira ponto novo nos gráficos).
-- **Plano:** o botão "Atualizar com dados recentes" usa a última avaliação mais o histórico recente (peso, % de gordura, medidas, treinos, alimentação), então as medidas lançadas no Registro já entram sem precisar de avaliação nova.
+- **Avaliação (aba Avaliação):** use ao mudar de meta ou de fase. Os campos vêm preenchidos com o seu último lançamento. Ao salvar, a ficha é gerada de novo e o que você **alterou** no formulário também vira lançamento do dia (o que veio pré-preenchido e não foi mexido não vira ponto novo nos gráficos).
+- **Questionário (opcional):** sexo, idade, altura, rotina diária, experiência, local, tempo por sessão, divisão, técnicas avançadas, validade, cardio, prioridades e lesões. Nada é obrigatório; o que ficar em branco, a IA decide e lista em "O que o plano assumiu". Sexo, idade, altura e rotina também melhoram o cálculo de calorias e macros.
+- **Plano (ficha):** o botão "Gerar nova ficha" usa a última avaliação mais o histórico recente (peso, % de gordura, medidas e treinos). A ficha vem com divisão A/B/C…, séries, repetições por fase, descanso, técnicas avançadas, semana tipo, cardio e **validade**.
+- **Validade da ficha:** vence pela data (semanas) **ou** quando as sessões de força previstas foram cumpridas, o que vier primeiro. Há aviso quando faltam 7 dias (ou 90% das sessões) e um aviso vermelho, em todas as abas, quando vence.
+
+## Macronutrientes
+
+Não há registro de alimentos. O app calcula uma meta diária de calorias, proteínas, carboidratos e gorduras no próprio navegador (arquivo `src/lib/nutrition.js`), sem IA e sem custo de tokens, e recalcula sempre que o peso mais recente muda. Use-a como referência na sua ferramenta de contagem. É uma estimativa (Mifflin-St Jeor ou Katch-McArdle, fator de atividade e ajuste pela meta); o cartão tem "Como é calculado".
 
 ## Painel (gráficos)
 
@@ -102,18 +115,25 @@ Um seletor de período (30 dias, 90 dias, 1 ano, tudo) vale para todo o painel:
 
 - **Nada obrigatório de campo**: mantido do protótipo original — todo dado é opcional, dias sem peso/treino/comida continuam funcionando.
 - **Chave da Anthropic nunca no navegador**: fica só na variável de ambiente do Netlify, usada exclusivamente dentro da function `claude-proxy.js`, que roda no servidor.
-- **Function exige login**: a function verifica o token de sessão do Supabase antes de chamar a Anthropic — evita que outra pessoa na internet use sua cota de API sem estar logada no seu app.
+- **Function exige login e e-mail autorizado**: as functions verificam o token de sessão do Supabase e, se `ALLOWED_EMAILS` estiver definido, se o e-mail está na lista, antes de chamar a Anthropic.
 - **Um blob JSONB por usuário** (`app_state.state`): é a forma mais direta de portar o protótipo (que guardava tudo num único objeto) sem redesenhar o modelo de dados agora. Se no futuro você quiser relatórios mais ricos (ex.: "todos os treinos de peito dos últimos 6 meses" via SQL), vale migrar para tabelas relacionais (`daily_logs`, `strength_sessions`, `meals`, `assessments`) — mas para uso pessoal diário o blob é suficiente e mais simples de manter.
 - **PWA via `vite-plugin-pwa`**: gera o manifest e o service worker automaticamente no build; os ícones estão em `public/icon-192.png` e `public/icon-512.png` (troque por algo com sua cara quando quiser).
 
-## Limites e custo das chamadas de IA (já tratados no código)
+## Segurança
 
-- **Raciocínio desligado em macros e classificação de exercício; ligado no plano.** Estimar macros e classificar exercício são tarefas simples de extração de JSON; deixar o modelo "pensar" só gastaria tokens de saída (cobrados) e tempo. Já o plano é gerado raramente e se beneficia de raciocínio, então ele roda com o raciocínio padrão do modelo e esforço `medium` (parâmetro `output_config.effort`; se a API recusar o parâmetro, a function refaz a chamada sem ele). Para desligar, a function (`claude-proxy.js`) se adapta ao modelo: o `claude-sonnet-5-5` exige `thinking: {"type":"between_tools"}` (e rejeita `disabled`), os anteriores aceitam `disabled`. Ela tenta as variantes em ordem e usa a que a API aceitar. Fonte: [guia de migração do Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/migration-guide).
-- **Teto de tokens por tipo de chamada**, definido em `src/lib/claude.js`: 1200 para macros, 300 para classificar exercício, 8000 para o plano (o JSON do plano tem ~2500 tokens e o raciocínio conta dentro do mesmo teto). A function nunca aceita mais de 8000.
-- **Se o plano estourar os 60s:** o raciocínio deixa a resposta mais lenta. Se isso acontecer com frequência, as saídas são baixar `effort` para `"low"` em `generatePlanFromContext`, dividir o plano em duas chamadas, ou mover a geração para uma Netlify Background Function (limite de 15 min), que grava o resultado no Supabase e o app consulta.
-- **Limite de tempo.** Funções síncronas da Netlify têm limite fixo de 60 segundos ([docs](https://docs.netlify.com/build/functions/configuration/)). A function aborta aos 55s e devolve um erro claro em vez de travar.
-- **Busca na web.** Com a busca ativa, o modelo costuma escrever um texto antes de pesquisar; o parser em `claude.js` extrai o JSON mesmo assim.
+- **Não existe senha**: o login é por link/código enviado ao seu e-mail, que só você abre. É um modelo seguro e mais simples que senha.
+- **Feche o cadastro aberto.** No Supabase: Authentication -> Sign In / Providers (ou Settings) -> desligue **Allow new users to sign up**. Crie antes o seu usuário (já existe se você já entrou). Assim ninguém mais consegue criar conta no seu site público.
+- **Defina `ALLOWED_EMAILS`** no Netlify (e faça redeploy): mesmo que alguém consiga uma conta, a IA só responde aos e-mails da lista.
+- **Código de 6 dígitos (celular):** em Authentication -> Email Templates -> **Magic Link**, inclua `{{ .Token }}` no texto, por exemplo: `Seu código: {{ .Token }}`. O app aceita o código na tela de login. Isso resolve o caso do app instalado na tela inicial, que não compartilha a sessão com o navegador onde o link abriu.
+- A sessão fica salva no aparelho; use o botão de sair (canto superior direito) em aparelhos compartilhados.
+
+## Limites e custo das chamadas de IA
+
+- **A ficha roda em segundo plano.** O app grava um pedido na tabela `plan_jobs`, chama `plan-background` (a Netlify responde na hora e deixa a função trabalhar por até 15 minutos, inclusive no plano gratuito) e consulta o resultado a cada 3 segundos. A ficha completa leva de 1 a 3 minutos; mantenha o app aberto. O limite de 60 s das functions comuns não se aplica.
+- **Raciocínio ligado na ficha** (esforço `medium`; se a API recusar o parâmetro, refaz sem ele) e desligado na classificação de exercício. O `claude-sonnet-5-5` exige `thinking: {"type":"between_tools"}` para desligar; a function tenta as variantes em ordem (ver `netlify/lib/anthropic.js`).
+- **Teto de tokens:** 16000 na ficha (raciocínio + JSON) e 300 na classificação de exercício; `claude-proxy` nunca aceita mais de 4000.
+- **Custo:** uma ficha custa na ordem de alguns centavos de dólar. Registrar peso, treino e cardio, e ver macros, gráficos e validade **não** chama a IA. A única chamada automática é classificar o grupo muscular de cada exercício novo (barata).
 
 ## Custos
 
-Tudo isso roda nos planos gratuitos do GitHub, Netlify e Supabase para uso pessoal. O único custo real é o consumo da **API da Anthropic** (estimativa de macros, classificação de exercício e geração do plano) — cobrado por uso, sem plano gratuito próprio; para um uso pessoal diário (algumas refeições e um plano por semana), o custo tende a ficar na casa de poucos dólares por mês. Você pode acompanhar em [console.anthropic.com](https://console.anthropic.com) e configurar limites de gasto lá.
+Tudo isso roda nos planos gratuitos do GitHub, Netlify e Supabase para uso pessoal. O único custo real é o consumo da **API da Anthropic** (classificação de exercício e geração da ficha) — cobrado por uso, sem plano gratuito próprio; para uso pessoal (uma ficha a cada poucas semanas), o custo tende a ficar na casa de poucos dólares por mês. Você pode acompanhar em [console.anthropic.com](https://console.anthropic.com) e configurar limites de gasto lá.

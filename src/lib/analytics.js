@@ -208,44 +208,6 @@ export function buildMuscleVolume(logs, dates, catalog, today, weeks) {
 }
 
 // ---------------------------------------------------------------------------
-// Calorias
-// ---------------------------------------------------------------------------
-/**
- * Um ponto por dia com calorias registradas nos últimos `days` dias. `tipo`:
- * "normal" (macros detalhados), "estimado" (só calorias totais) ou "lixo" (dia do lixo).
- * As médias ignoram dias do lixo, para não distorcer a tendência.
- */
-export function buildCalorieSeries(logs, dates, today, days) {
-  const start = addDays(today, -(days - 1));
-  const rows = [];
-  for (const d of dates) {
-    if (d < start || d > today) continue;
-    const e = logs[d] || {};
-    let kcal = 0;
-    let proteina = null;
-    let tipo = "normal";
-    if (e.dietMode === "estimado") {
-      kcal = num(e.estimatedCalories) || 0;
-      tipo = "estimado";
-    } else {
-      const meals = e.meals || [];
-      kcal = meals.reduce((a, m) => a + (m.calorias_kcal || 0), 0);
-      proteina = meals.reduce((a, m) => a + (m.proteinas_g || 0), 0);
-    }
-    if (e.cheatDay) tipo = "lixo";
-    if (!kcal) continue;
-    rows.push({ date: d, label: labelOf(d), kcal: Math.round(kcal), proteina: proteina == null ? null : Math.round(proteina), tipo, [tipo]: Math.round(kcal) });
-  }
-  const normais = rows.filter((r) => r.tipo !== "lixo");
-  const mediaKcal = normais.length ? Math.round(normais.reduce((a, r) => a + r.kcal, 0) / normais.length) : null;
-
-  const from7 = addDays(today, -6);
-  const prot = rows.filter((r) => r.date >= from7 && r.tipo !== "lixo" && r.proteina);
-  const mediaProteina7d = prot.length ? Math.round(prot.reduce((a, r) => a + r.proteina, 0) / prot.length) : null;
-  return { rows, mediaKcal, diasMedia: normais.length, mediaProteina7d, diasProteina7d: prot.length };
-}
-
-// ---------------------------------------------------------------------------
 // Constância
 // ---------------------------------------------------------------------------
 const trainedFlags = (e) => ({

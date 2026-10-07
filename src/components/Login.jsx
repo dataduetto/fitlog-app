@@ -17,6 +17,8 @@ export default function Login() {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState("idle"); // idle | sending | sent | error
   const [errorMsg, setErrorMsg] = useState("");
+  const [code, setCode] = useState("");
+  const [verifying, setVerifying] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -25,7 +27,7 @@ export default function Login() {
     setErrorMsg("");
     const { error } = await supabase.auth.signInWithOtp({
       email: email.trim(),
-      options: { emailRedirectTo: window.location.origin },
+      options: { emailRedirectTo: window.location.origin, shouldCreateUser: false },
     });
     if (error) {
       setStatus("error");
@@ -33,6 +35,22 @@ export default function Login() {
     } else {
       setStatus("sent");
     }
+  };
+
+  // Alternativa ao link: código de 6 dígitos que vem no mesmo e-mail. Útil no celular, quando o
+  // link abre em outro navegador/app (o app instalado na tela inicial não compartilha a sessão).
+  const handleVerify = async (e) => {
+    e.preventDefault();
+    if (!code.trim()) return;
+    setVerifying(true);
+    setErrorMsg("");
+    const { error } = await supabase.auth.verifyOtp({ email: email.trim(), token: code.trim(), type: "email" });
+    setVerifying(false);
+    if (error) {
+      setStatus("sent");
+      setErrorMsg("Código inválido ou expirado. Confira os dígitos ou peça um novo.");
+    }
+    // sucesso: o onAuthStateChange do App.jsx troca a tela sozinho
   };
 
   return (
@@ -68,7 +86,7 @@ export default function Login() {
         <div>
           <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 20, fontWeight: 700 }}>FitLog</div>
           <div style={{ fontSize: 13, color: COLORS.textMid, marginTop: 4 }}>
-            Entre com seu e-mail para acessar seu diário de treino e alimentação.
+            Entre com seu e-mail para acessar seu diário de treino.
           </div>
         </div>
 
@@ -108,17 +126,19 @@ export default function Login() {
         )}
 
         {status === "sent" ? (
-          <div
-            style={{
-              border: `1px solid ${COLORS.line}`,
-              borderRadius: 4,
-              padding: "10px 12px",
-              fontSize: 13.5,
-              color: COLORS.textHi,
-            }}
-          >
-            Link de acesso enviado para <strong>{email}</strong>. Abra o e-mail neste dispositivo e clique no link
-            para entrar.
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "10px 12px", fontSize: 13.5, color: COLORS.textHi, lineHeight: 1.5 }}>
+              Enviamos um e-mail para <strong>{email}</strong>. Clique no link neste dispositivo <strong>ou</strong> digite abaixo o código de 6 dígitos que vem no e-mail.
+            </div>
+            <input
+              inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, ""))} placeholder="Código do e-mail"
+              style={{ background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 4, color: COLORS.textHi, padding: "10px 12px", fontSize: 16, letterSpacing: 3, outline: "none" }}
+            />
+            <button
+              type="button" onClick={handleVerify} disabled={verifying || code.length < 6}
+              style={{ background: verifying || code.length < 6 ? COLORS.tealSoft : COLORS.teal, color: "#0B1614", border: "none", borderRadius: 4, padding: "11px 16px", fontSize: 14, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", cursor: "pointer" }}
+            >{verifying ? "Verificando…" : "Entrar com o código"}</button>
           </div>
         ) : (
           <button

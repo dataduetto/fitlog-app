@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import { estimateMacros } from "../src/lib/nutrition.js";
+const a = estimateMacros({ pesoKg: 80, alturaCm: 178, idade: 35, sexo: "masculino", atividadeDiaria: "sentado", diasTreino: 4, meta: "hipertrofia", gorduraPct: 18 });
+assert.ok(a.ok); assert.equal(a.detalhes.bmr, 1743); assert.equal(a.proteinas_g, 144);
+assert.ok(a.calorias_kcal > 2600 && a.calorias_kcal < 2750, a.calorias_kcal);
+const kc = 4*a.proteinas_g+4*a.carboidratos_g+9*a.gorduras_g; assert.ok(Math.abs(kc-a.calorias_kcal)<=10);
+assert.equal(estimateMacros({}).ok, false);
+assert.equal(estimateMacros({ pesoKg: 70, idade: 16 }).motivo, "menor_de_idade");
+const b = estimateMacros({ pesoKg: 70 }); assert.ok(b.ok && b.detalhes.aproximado && b.detalhes.avisos.length);
+const c = estimateMacros({ pesoKg: 110, alturaCm: 175, idade: 40, sexo: "masculino", meta: "emagrecimento" });
+assert.ok(c.detalhes.pesoAjustado && c.proteinas_g < 2*110);
+const d = estimateMacros({ pesoKg: 60, alturaCm: 1.65, idade: 30, sexo: "feminino", meta: "emagrecimento", diasTreino: 0 });
+assert.ok(d.calorias_kcal >= d.detalhes.bmr - 10 && d.carboidratos_g >= 50);
+console.log("nutrition ok", a.calorias_kcal, a.proteinas_g, a.carboidratos_g, a.gorduras_g);

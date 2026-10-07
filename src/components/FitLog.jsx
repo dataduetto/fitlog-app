@@ -1,19 +1,25 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, Legend, ReferenceLine
+  ResponsiveContainer, Legend
 } from "recharts";
 import {
   Dumbbell, HeartPulse, UtensilsCrossed, LineChart as LineChartIcon,
-  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut
+  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut, AlertTriangle, History
 } from "lucide-react";
 import { loadState, persistState, emptyState } from "../lib/storage";
-import { lookupMacros, classifyExercise, generatePlanFromContext } from "../lib/claude";
+import { classifyExercise, generatePlanFromContext } from "../lib/claude";
+import { estimateMacros, macroInputFrom } from "../lib/nutrition";
+import { planStatus, currentPhaseIndex } from "../lib/planStatus";
+import {
+  GOALS, GOAL_INFO, SEXO_OPCOES, ATIVIDADE_DIARIA_OPCOES, EXPERIENCIA_OPCOES, LOCAL_OPCOES, DIVISAO_OPCOES,
+  TECNICAS_OPCOES, CICLO_OPCOES, CARDIO_OPCOES, PRIORIDADES_OPCOES, TEMPO_SESSAO_OPCOES,
+} from "../lib/goals";
 import { debounce } from "../lib/debounce";
 import {
   MEDIDAS, DEFAULT_SETS, periodStart, buildBodySeries, withMovingAverage, filterFrom,
   firstLastDelta, buildMeasureSeries, latestMeasures, measureHistoryForPlan, buildLoadSeries,
-  buildMuscleVolume, buildCalorieSeries, buildConsistency, buildWeeklyMinutes,
+  buildMuscleVolume, buildConsistency, buildWeeklyMinutes,
 } from "../lib/analytics";
 
 // ---------------------------------------------------------------------------
@@ -34,14 +40,6 @@ const COLORS = {
   amberSoft: "#4A3A22",
   red: "#D9695B",
   redSoft: "#241A18",
-};
-
-const GOALS = {
-  hipertrofia: "Hipertrofia",
-  emagrecimento: "Emagrecimento",
-  recomposicao: "Recomposição corporal",
-  resistencia: "Resistência / condicionamento",
-  manutencao: "Manutenção",
 };
 
 const EXERCICIOS_COMUNS = [
@@ -71,8 +69,7 @@ function uid() {
 function emptyDay(date) {
   return {
     date, weight: "", leanMassPct: "", bodyFatPct: "", medidas: {},
-    strengthWorkouts: [], cardioWorkouts: [], meals: [],
-    dietMode: "detalhado", estimatedCalories: "", cheatDay: false, cheatDayNote: "",
+    strengthWorkouts: [], cardioWorkouts: [],
   };
 }
 function n(v) {
@@ -160,19 +157,59 @@ function EmptyState({ text }) {
     </div>
   );
 }
-function MacroBar({ label, value, target, unit }) {
-  const pct = target ? Math.min(100, Math.round((value / target) * 100)) : null;
+// ---------------------------------------------------------------------------
+// Sugestão de macronutrientes (calculada no app, sem IA)
+// ---------------------------------------------------------------------------
+const fmtKg = (x) => Number(x).toLocaleString("pt-BR", { maximumFractionDigits: 2 });
+function MacroCard({ result, weightDate, onGoToAssessment }) {
+  const [open, setOpen] = useState(false);
+  if (!result || !result.ok) {
+    const msg = result?.motivo === "menor_de_idade"
+      ? "A sugestão automática de macronutrientes não é calculada para menores de 18 anos. Procure um nutricionista."
+      : "Informe o peso acima para ver a sugestão diária de calorias e macronutrientes.";
+    return (
+      <div style={{ background: COLORS.surface, border: `1px dashed ${COLORS.lineStrong}`, borderRadius: 4, padding: "12px 14px", fontSize: 13, color: COLORS.textMid }}>{msg}</div>
+    );
+  }
+  const d = result.detalhes;
+  const falta = [];
+  if (d.aproximado || d.suposicoes.length) falta.push(true);
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: COLORS.textMid }}>
-        <span>{label}</span>
-        <span style={{ fontFamily: "'Space Grotesk', sans-serif" }}>
-          {Math.round(value)}{unit}{target ? ` / ${Math.round(target)}${unit}` : ""}
-        </span>
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "14px 14px 12px" }}>
+      <SectionTitle icon={UtensilsCrossed} title="Sugestão diária de macronutrientes" />
+      <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 4 }}>
+        Atualizada com o último peso lançado ({d.pesoKg} kg{weightDate ? `, ${fmtDate(weightDate)}` : ""}). Use como meta na sua ferramenta de contagem.
       </div>
-      <div style={{ height: 6, background: COLORS.surface, borderRadius: 3, overflow: "hidden" }}>
-        <div style={{ height: "100%", width: `${pct ?? (value > 0 ? 100 : 0)}%`, background: COLORS.teal }} />
+      <div style={{ display: "flex", gap: 24, marginTop: 12, flexWrap: "wrap" }}>
+        <StatReadout label="Proteínas" value={result.proteinas_g} unit="g" sub={`${fmtKg(result.porKg.proteina)} g/kg`} />
+        <StatReadout label="Carboidratos" value={result.carboidratos_g} unit="g" sub={`${fmtKg(result.porKg.carboidrato)} g/kg`} />
+        <StatReadout label="Gorduras" value={result.gorduras_g} unit="g" sub={`${fmtKg(result.porKg.gordura)} g/kg`} />
+        <StatReadout label="Calorias" value={result.calorias_kcal} unit="kcal" sub={d.ajustePct === 0 ? "manutenção" : `${d.ajustePct > 0 ? "+" : "−"}${Math.abs(d.ajustePct)}% sobre o gasto`} />
       </div>
+      {[...d.avisos, ...d.suposicoes].length > 0 && (
+        <ul style={{ margin: "10px 0 0", paddingLeft: 18, display: "flex", flexDirection: "column", gap: 3 }}>
+          {[...d.avisos, ...d.suposicoes].map((t, i) => <li key={i} style={{ fontSize: 11.5, color: COLORS.amber, lineHeight: 1.45 }}>{t}</li>)}
+        </ul>
+      )}
+      <div style={{ display: "flex", gap: 14, marginTop: 10, flexWrap: "wrap", alignItems: "center" }}>
+        <button onClick={() => setOpen(!open)} style={{ background: "none", border: "none", color: COLORS.teal, fontSize: 12, cursor: "pointer", padding: 0 }}>
+          {open ? "Ocultar como é calculado" : "Como é calculado"}
+        </button>
+        {onGoToAssessment && (
+          <button onClick={onGoToAssessment} style={{ background: "none", border: "none", color: COLORS.textMid, fontSize: 12, cursor: "pointer", padding: 0, textDecoration: "underline" }}>
+            Melhorar a precisão (altura, idade, sexo — opcionais)
+          </button>
+        )}
+      </div>
+      {open && (
+        <div style={{ marginTop: 10, fontSize: 12, color: COLORS.textMid, lineHeight: 1.6, borderTop: `1px solid ${COLORS.line}`, paddingTop: 10 }}>
+          <div>Metabolismo basal: <b style={{ color: COLORS.textHi }}>{d.bmr} kcal</b> ({d.metodoBmr}).</div>
+          <div>Gasto diário estimado: {d.bmr} × {String(d.fatorAtividade).replace(".", ",")} (atividade do dia a dia + dias de treino) = <b style={{ color: COLORS.textHi }}>{d.tdee} kcal</b>.</div>
+          <div>Meta ({GOALS[d.meta]}): {d.ajustePct === 0 ? "calorias na manutenção" : `${d.ajustePct > 0 ? "+" : "−"}${Math.abs(d.ajustePct)}% sobre o gasto`}.</div>
+          <div>Proteína: {String(d.protGPorKgRef).replace(".", ",")} g por kg{d.pesoAjustado ? ` sobre um peso de referência ajustado de ${d.pesoReferenciaKg} kg (peso ideal + 40% do excesso)` : ""}. Gordura: pelo menos 0,6 g/kg e cerca de 25% das calorias. Carboidratos: o restante.</div>
+          <div style={{ marginTop: 6, color: COLORS.textFaint }}>É uma estimativa para começar; ajuste pelo resultado de 2 a 3 semanas (peso e medidas). Não substitui acompanhamento de nutricionista.</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -235,17 +272,6 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     commit({ ...state, logs: { ...logs, [selectedDate]: nextDay } });
   }, [state, logs, selectedDate, commit]);
 
-  const updateMealInDay = useCallback((date, mealId, patch) => {
-    setState((prev) => {
-      const d = prev.logs[date];
-      if (!d) return prev;
-      const meals = (d.meals || []).map((m) => (m.id === mealId ? { ...m, ...patch } : m));
-      const next = { ...prev, logs: { ...prev.logs, [date]: { ...d, meals } } };
-      debouncedPersist(next);
-      return next;
-    });
-  }, [debouncedPersist]);
-
   const sortedDates = useMemo(() => Object.keys(logs).sort(), [logs]);
 
   const streak = useMemo(() => {
@@ -254,7 +280,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     while (true) {
       const iso = cursor.toISOString().slice(0, 10);
       const e = logs[iso];
-      const hasData = e && ((e.strengthWorkouts || []).length || (e.cardioWorkouts || []).length || (e.meals || []).length || e.weight);
+      const hasData = e && ((e.strengthWorkouts || []).length || (e.cardioWorkouts || []).length || e.weight);
       if (hasData) { count += 1; cursor.setDate(cursor.getDate() - 1); } else break;
     }
     return count;
@@ -276,18 +302,12 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     return p ? p.gordura : "";
   }, [bodySeries]);
 
-  const todayMacros = useMemo(() => {
-    if (day.dietMode === "estimado") {
-      return { carboidratos_g: 0, proteinas_g: 0, gorduras_g: 0, calorias_kcal: Number(day.estimatedCalories) || 0, estimadoSemMacros: true };
-    }
-    const meals = day.meals || [];
-    return meals.reduce((acc, m) => ({
-      carboidratos_g: acc.carboidratos_g + (m.carboidratos_g || 0),
-      proteinas_g: acc.proteinas_g + (m.proteinas_g || 0),
-      gorduras_g: acc.gorduras_g + (m.gorduras_g || 0),
-      calorias_kcal: acc.calorias_kcal + (m.calorias_kcal || 0),
-    }), { carboidratos_g: 0, proteinas_g: 0, gorduras_g: 0, calorias_kcal: 0 });
-  }, [day.meals, day.dietMode, day.estimatedCalories]);
+  // Sugestão de macros: recalculada sozinha sempre que o peso mais recente (ou a avaliação) muda.
+  const macroResult = useMemo(
+    () => estimateMacros(macroInputFrom({ latestWeight, latestBodyFat, assessment: latestAssessment })),
+    [latestWeight, latestBodyFat, latestAssessment]
+  );
+  const pStatus = useMemo(() => planStatus(currentPlan, logs), [currentPlan, logs]);
 
   // -------- plan generation --------
   const buildContext = useCallback((assessment) => {
@@ -303,29 +323,22 @@ export default function FitLog({ userId, onLogout, userEmail }) {
       treinosForcaRecentes: recentDates.flatMap((d) => (logs[d].strengthWorkouts || []).map((s) => ({ data: d, ...s }))),
       treinosCardioRecentes: recentDates.flatMap((d) => (logs[d].cardioWorkouts || []).map((c) => ({ data: d, ...c }))),
       catalogoExercicios: exerciseCatalog || {},
-      alimentacaoRecente: recentDates.map((d) => {
-        const entry = logs[d];
-        if (entry.dietMode === "estimado") {
-          return { data: d, modo: "estimativa_total", calorias_kcal: Number(entry.estimatedCalories) || null, diaDoLixo: !!entry.cheatDay };
-        }
-        const meals = entry.meals || [];
-        const totals = meals.reduce((acc, m) => ({
-          carboidratos_g: acc.carboidratos_g + (m.carboidratos_g || 0),
-          proteinas_g: acc.proteinas_g + (m.proteinas_g || 0),
-          gorduras_g: acc.gorduras_g + (m.gorduras_g || 0),
-          calorias_kcal: acc.calorias_kcal + (m.calorias_kcal || 0),
-        }), { carboidratos_g: 0, proteinas_g: 0, gorduras_g: 0, calorias_kcal: 0 });
-        return { data: d, modo: "detalhado", diaDoLixo: !!entry.cheatDay, ...totals };
-      }),
+      metasMacro: macroResult.ok
+        ? { calorias_kcal: macroResult.calorias_kcal, proteinas_g: macroResult.proteinas_g, carboidratos_g: macroResult.carboidratos_g, gorduras_g: macroResult.gorduras_g }
+        : null,
+      planoAnterior: currentPlan?.sessoes ? {
+        divisao: currentPlan.divisao, validade: currentPlan.validade, geradoEm: currentPlan.generatedAt,
+        sessoes: currentPlan.sessoes.map((x) => ({ id: x.id, foco: x.foco, exercicios: x.exercicios.map((e) => `${e.nome} ${e.series}x${e.reps?.[0] ?? ""}`) })),
+      } : null,
     };
-  }, [sortedDates, assessments, bodySeries, measureSeries, logs, exerciseCatalog]);
+  }, [sortedDates, assessments, bodySeries, measureSeries, logs, exerciseCatalog, macroResult, currentPlan]);
 
   const generatePlan = async (assessment) => {
     const useAssessment = assessment || latestAssessment;
     if (!useAssessment) { setPlanError("Preencha a avaliação física antes de gerar um plano."); return; }
     setPlanLoading(true); setPlanError("");
     try {
-      const context = buildContext(useAssessment);
+      const context = buildContext(cleanAssessment(useAssessment));
       const parsed = await generatePlanFromContext(context);
       const nextPlan = { ...parsed, generatedAt: new Date().toISOString(), assessmentId: useAssessment.id };
       // Funcional de propósito: durante a geração você pode ter salvo uma avaliação ou lançado
@@ -333,15 +346,20 @@ export default function FitLog({ userId, onLogout, userEmail }) {
       commitWith((prev) => ({ ...prev, currentPlan: nextPlan }));
       setTab("plano");
     } catch (e) {
-      setPlanError("Não foi possível gerar o plano agora. Tente novamente em instantes.");
+      setPlanError(`Não foi possível gerar o plano: ${e?.message || "erro desconhecido"}`);
     } finally {
       setPlanLoading(false);
     }
   };
 
+  // Remove campos vazios (o plano trata ausência como "sem preferência").
+  const cleanAssessment = (a) => Object.fromEntries(
+    Object.entries(a).filter(([, v]) => v !== "" && v != null && !(Array.isArray(v) && v.length === 0))
+  );
+
   const saveAssessment = (draft) => {
     const date = todayISO();
-    const assessment = { id: uid(), date, ...draft };
+    const assessment = { id: uid(), date, ...cleanAssessment(draft) };
     // Os valores que você digitou ou alterou na avaliação também entram no registro de hoje,
     // para alimentar os gráficos do Painel. Os campos que vieram pré-preenchidos e não foram
     // mexidos NÃO entram: seriam medidas antigas aparecendo como se fossem de hoje.
@@ -398,7 +416,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     { id: "avaliacao", label: "Avaliação", icon: Ruler },
     { id: "plano", label: "Plano", icon: Target },
     { id: "painel", label: "Painel", icon: LineChartIcon },
-    { id: "historico", label: "Histórico", icon: UtensilsCrossed },
+    { id: "historico", label: "Histórico", icon: History },
   ];
 
   return (
@@ -406,7 +424,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
       {fontImport}
       <div style={{ borderBottom: `1px solid ${COLORS.line}`, padding: "16px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
         <div>
-          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, fontWeight: 600 }}>Diário de treino e alimentação</div>
+          <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 19, fontWeight: 600 }}>Diário de treino</div>
           <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 2 }}>
             {latestAssessment ? `Meta atual: ${GOALS[latestAssessment.meta]}` : "Preencha a avaliação física para definir uma meta"}
             {streak > 0 ? ` · Sequência: ${streak} dia${streak > 1 ? "s" : ""}` : ""}
@@ -435,28 +453,18 @@ export default function FitLog({ userId, onLogout, userEmail }) {
         </div>
 
         <div className="fitlog-scroll fitlog-content" style={{ flex: 1, padding: 20, overflowY: "auto", minWidth: 0 }}>
+          <PlanExpiryBanner
+            status={pStatus} loading={planLoading}
+            primaryLabel={pStatus?.expired ? "Gerar nova ficha" : "Ver ficha"}
+            onPrimary={() => (pStatus?.expired && latestAssessment ? (setTab("plano"), generatePlan(latestAssessment)) : setTab("plano"))}
+          />
           {tab === "registro" && (
             <RegistroTab
               selectedDate={selectedDate} setSelectedDate={setSelectedDate}
               day={day} updateDay={updateDay}
               onClassifyExercise={ensureExerciseClassified}
-              onAddMeal={async (descricao) => {
-                const id = uid();
-                const date = selectedDate;
-                const optimistic = { id, descricao, status: "estimando", carboidratos_g: null, proteinas_g: null, gorduras_g: null, calorias_kcal: null };
-                const currentDay = logs[date] || emptyDay(date);
-                commit({ ...state, logs: { ...logs, [date]: { ...currentDay, meals: [...(currentDay.meals || []), optimistic] } } });
-                try {
-                  const macros = await lookupMacros(descricao);
-                  updateMealInDay(date, id, { ...macros, status: "ok" });
-                } catch (e) {
-                  updateMealInDay(date, id, { status: "erro" });
-                }
-              }}
-              onRemoveMeal={(id) => updateDay({ meals: (day.meals || []).filter((m) => m.id !== id) })}
-              onEditMeal={(id, patch) => updateMealInDay(selectedDate, id, patch)}
-              todayMacros={todayMacros}
-              macroTargets={currentPlan?.metasMacro}
+              macroResult={macroResult} weightDate={latestWeight?.date}
+              onGoToAssessment={() => setTab("avaliacao")}
             />
           )}
           {tab === "avaliacao" && (
@@ -469,12 +477,12 @@ export default function FitLog({ userId, onLogout, userEmail }) {
           {tab === "plano" && (
             <PlanoTab plan={currentPlan} loading={planLoading} error={planError}
               onRegenerate={() => generatePlan(latestAssessment)} hasAssessment={!!latestAssessment}
-              onGoToAssessment={() => setTab("avaliacao")} />
+              onGoToAssessment={() => setTab("avaliacao")}
+              status={pStatus} macroResult={macroResult} weightDate={latestWeight?.date} />
           )}
           {tab === "painel" && (
             <PainelTab logs={logs} sortedDates={sortedDates} bodySeries={bodySeries} measureSeries={measureSeries}
-              exerciseCatalog={exerciseCatalog} latestAssessment={latestAssessment}
-              todayMacros={todayMacros} macroTargets={currentPlan?.metasMacro} />
+              exerciseCatalog={exerciseCatalog} latestAssessment={latestAssessment} />
           )}
           {tab === "historico" && (
             <HistoricoTab sortedDates={sortedDates} logs={logs}
@@ -490,12 +498,11 @@ export default function FitLog({ userId, onLogout, userEmail }) {
 // ---------------------------------------------------------------------------
 // Registro
 // ---------------------------------------------------------------------------
-function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, onAddMeal, onRemoveMeal, onEditMeal, todayMacros, macroTargets }) {
+function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, macroResult, weightDate, onGoToAssessment }) {
   const [exerciseList, setExerciseList] = useState([]);
   const [exerciseDraft, setExerciseDraft] = useState({ nome: "", carga_kg: "", esquema: "" });
   const [sessionDraft, setSessionDraft] = useState({ duracao: "", hr_avg: "", hr_max: "", calorias: "", rpe: "7" });
   const [cardioDraft, setCardioDraft] = useState({ tipo: "corrida", duracao: "", hr_avg: "", hr_max: "", pace: "", calorias: "", rpe: "6" });
-  const [mealText, setMealText] = useState("");
   const [showMedidas, setShowMedidas] = useState(false);
   // a seção abre sozinha quando o dia selecionado já tem alguma medida lançada
   const medidasAbertas = showMedidas || Object.values(day.medidas || {}).some((v) => v !== "" && v != null);
@@ -566,6 +573,10 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
           ) : (
             <GhostButton onClick={() => setShowMedidas(true)}><Ruler size={14} />Registrar medidas corporais</GhostButton>
           )}
+        </div>
+
+        <div style={{ marginTop: 16 }}>
+          <MacroCard result={macroResult} weightDate={weightDate} onGoToAssessment={onGoToAssessment} />
         </div>
       </section>
 
@@ -670,110 +681,65 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
         </div>
       </section>
 
-      {/* Alimentação */}
-      <section style={{ borderTop: `1px solid ${COLORS.line}`, paddingTop: 16 }}>
-        <SectionTitle icon={UtensilsCrossed} title="Alimentação do dia" />
-        <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 4 }}>Opcional todos os dias — registre por refeição quando der, ou só o total quando não der.</div>
-
-        <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 12, alignItems: "center" }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.textHi, cursor: "pointer" }}>
-            <input type="checkbox" checked={day.dietMode === "estimado"}
-              onChange={(e) => updateDay({ dietMode: e.target.checked ? "estimado" : "detalhado" })} />
-            Hoje não vou detalhar — só informar o total de calorias
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: COLORS.amber, cursor: "pointer" }}>
-            <input type="checkbox" checked={!!day.cheatDay} onChange={(e) => updateDay({ cheatDay: e.target.checked })} />
-            Dia do lixo (alta caloria / álcool)
-          </label>
-        </div>
-
-        {day.dietMode === "estimado" ? (
-          <div style={{ marginTop: 12 }}>
-            <Field label="Calorias totais estimadas do dia">
-              <TextInput type="number" placeholder="2200" value={day.estimatedCalories} onChange={(e) => updateDay({ estimatedCalories: e.target.value })} style={{ width: 130 }} />
-            </Field>
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
-            {(day.meals || []).map((m) => (
-              <div key={m.id} style={{ display: "flex", alignItems: "center", gap: 10, background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "8px 10px" }}>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 13.5 }}>{m.descricao}</div>
-                  {m.status === "estimando" && (
-                    <div style={{ fontSize: 11.5, color: COLORS.textMid, display: "flex", alignItems: "center", gap: 6 }}>
-                      <Loader2 size={11} style={{ animation: "spin 1s linear infinite" }} /> estimando macronutrientes…
-                    </div>
-                  )}
-                  {m.status === "erro" && <div style={{ fontSize: 11.5, color: COLORS.red }}>não foi possível estimar — edite manualmente abaixo</div>}
-                  {(m.status === "ok" || m.status === "erro") && (
-                    <div style={{ display: "flex", gap: 10, marginTop: 4, flexWrap: "wrap" }}>
-                      <MiniMacroInput label="carb" value={m.carboidratos_g} onChange={(v) => onEditMeal(m.id, { carboidratos_g: v })} />
-                      <MiniMacroInput label="prot" value={m.proteinas_g} onChange={(v) => onEditMeal(m.id, { proteinas_g: v })} />
-                      <MiniMacroInput label="gord" value={m.gorduras_g} onChange={(v) => onEditMeal(m.id, { gorduras_g: v })} />
-                      <MiniMacroInput label="kcal" value={m.calorias_kcal} onChange={(v) => onEditMeal(m.id, { calorias_kcal: v })} />
-                    </div>
-                  )}
-                </div>
-                <IconButton onClick={() => onRemoveMeal(m.id)} danger title="Remover"><Trash2 size={14} /></IconButton>
-              </div>
-            ))}
-            <div style={{ display: "flex", gap: 8 }}>
-              <TextInput placeholder="ex.: 200g de peito de frango grelhado" value={mealText} onChange={(e) => setMealText(e.target.value)} style={{ flex: 1 }}
-                onKeyDown={(e) => { if (e.key === "Enter" && mealText.trim()) { onAddMeal(mealText.trim()); setMealText(""); } }} />
-              <PrimaryButton onClick={() => { if (mealText.trim()) { onAddMeal(mealText.trim()); setMealText(""); } }}><Plus size={15} /> Adicionar</PrimaryButton>
-            </div>
-          </div>
-        )}
-
-        <div style={{ marginTop: 16, display: "flex", flexDirection: "column", gap: 10 }}>
-          <MacroBar label="Calorias" value={todayMacros.calorias_kcal} target={macroTargets?.calorias_kcal} unit=" kcal" />
-          {!todayMacros.estimadoSemMacros && (
-            <>
-              <MacroBar label="Carboidratos" value={todayMacros.carboidratos_g} target={macroTargets?.carboidratos_g} unit="g" />
-              <MacroBar label="Proteínas" value={todayMacros.proteinas_g} target={macroTargets?.proteinas_g} unit="g" />
-              <MacroBar label="Gorduras" value={todayMacros.gorduras_g} target={macroTargets?.gorduras_g} unit="g" />
-            </>
-          )}
-          {todayMacros.estimadoSemMacros && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>Modo estimativa: só o total de calorias é considerado hoje, sem detalhamento de macros.</div>}
-          {!macroTargets && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>Preencha a avaliação física para definir metas de macronutrientes.</div>}
-        </div>
-      </section>
     </div>
-  );
-}
-
-function MiniMacroInput({ label, value, onChange }) {
-  return (
-    <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11.5, color: COLORS.textMid }}>
-      {label}
-      <input type="number" value={value ?? ""} onChange={(e) => onChange(e.target.value === "" ? null : Number(e.target.value))}
-        style={{ width: 52, background: COLORS.bg, border: `1px solid ${COLORS.line}`, borderRadius: 3, color: COLORS.textHi, padding: "2px 4px", fontSize: 11.5 }} />
-    </label>
   );
 }
 
 // ---------------------------------------------------------------------------
 // Avaliação
 // ---------------------------------------------------------------------------
+function QuestionGroup({ title, hint, children, defaultOpen }) {
+  return (
+    <details open={defaultOpen} style={{ border: `1px solid ${COLORS.line}`, borderRadius: 4, background: COLORS.surface }}>
+      <summary style={{ cursor: "pointer", padding: "11px 14px", fontSize: 13.5, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", listStyle: "none" }}>
+        {title} <span style={{ fontWeight: 400, color: COLORS.textFaint, fontSize: 12 }}>— {hint}</span>
+      </summary>
+      <div style={{ padding: "4px 14px 14px", display: "flex", flexDirection: "column", gap: 14 }}>{children}</div>
+    </details>
+  );
+}
+
+function OptionSelect({ value, onChange, options, width = 280, emptyLabel = "Não informar" }) {
+  return (
+    <Select value={value} onChange={onChange} style={{ width, maxWidth: "100%" }}>
+      {!options.some((o) => o.id === "") && <option value="">{emptyLabel}</option>}
+      {options.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+    </Select>
+  );
+}
+
+const PROFILE_KEYS = [
+  "sexo", "idade", "alturaCm", "atividadeDiaria", "experiencia", "local", "tempoSessaoMin", "divisao",
+  "tecnicas", "cicloSemanas", "cardioPref", "pesoAlvo", "lesoes",
+];
+
 function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedidas, latestBodyFat, onSave, planLoading, planError }) {
   // Os valores vêm pré-preenchidos com o último lançamento do registro diário (editáveis).
-  // Meta e frequência partem da última avaliação, se houver.
+  // Meta, frequência e o questionário partem da última avaliação, se houver. Nada é obrigatório.
+  const prev = latestAssessment || {};
   const [draft, setDraft] = useState({
     weight: latestWeight?.peso ?? "", leanMassPct: latestWeight?.massaMagra ?? "", bodyFatPct: latestBodyFat ?? "",
     biceps: latestMedidas?.biceps ?? "", peito: latestMedidas?.peito ?? "", cintura: latestMedidas?.cintura ?? "",
     quadril: latestMedidas?.quadril ?? "", coxa: latestMedidas?.coxa ?? "", panturrilha: latestMedidas?.panturrilha ?? "",
-    meta: latestAssessment?.meta ?? "hipertrofia", metaObs: latestAssessment?.metaObs ?? "",
-    frequenciaSemanal: latestAssessment?.frequenciaSemanal ?? "4",
+    meta: prev.meta ?? "hipertrofia", metaObs: prev.metaObs ?? "",
+    frequenciaSemanal: prev.frequenciaSemanal ?? "4",
+    prioridades: prev.prioridades ?? [],
+    ...Object.fromEntries(PROFILE_KEYS.map((k) => [k, prev[k] ?? ""])),
   });
 
   const set = (k) => (e) => setDraft({ ...draft, [k]: e.target.value });
+  const togglePrioridade = (id) => setDraft({
+    ...draft,
+    prioridades: draft.prioridades.includes(id) ? draft.prioridades.filter((x) => x !== id) : [...draft.prioridades, id],
+  });
+  const filled = PROFILE_KEYS.filter((k) => draft[k] !== "" && draft[k] != null).length + (draft.prioridades.length ? 1 : 0) + (draft.metaObs.trim() ? 1 : 0);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 22, maxWidth: 620 }}>
       <div>
         <SectionTitle icon={Ruler} title="Avaliação física e meta" />
-        <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 4 }}>
-          Use ao mudar de meta ou de fase. A cada envio, o plano de treino e as metas de alimentação são recalculados. Para acompanhar peso e medidas no dia a dia sem gerar plano, lance-os na aba Registro. Os campos abaixo vêm preenchidos com o seu último lançamento; só o que você alterar vira um novo ponto nos gráficos.
+        <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 4, lineHeight: 1.55 }}>
+          Use ao mudar de meta ou de fase. A cada envio, a ficha de treino é refeita. Para acompanhar peso e medidas no dia a dia sem gerar plano, lance-os na aba Registro. Os campos abaixo vêm preenchidos com o seu último lançamento; só o que você alterar vira um novo ponto nos gráficos. <b style={{ color: COLORS.textHi }}>Nenhum campo é obrigatório</b>: quanto mais você informar, mais a ficha se parece com a de um professor que conhece você.
         </div>
       </div>
 
@@ -786,29 +752,88 @@ function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedid
       <div>
         <div style={{ fontSize: 13, color: COLORS.textMid, marginBottom: 10 }}>Medidas corporais (cm)</div>
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-          <Field label="Bíceps"><TextInput type="number" step="0.5" value={draft.biceps} onChange={set("biceps")} style={{ width: 90 }} /></Field>
-          <Field label="Peito"><TextInput type="number" step="0.5" value={draft.peito} onChange={set("peito")} style={{ width: 90 }} /></Field>
-          <Field label="Cintura"><TextInput type="number" step="0.5" value={draft.cintura} onChange={set("cintura")} style={{ width: 90 }} /></Field>
-          <Field label="Quadril"><TextInput type="number" step="0.5" value={draft.quadril} onChange={set("quadril")} style={{ width: 90 }} /></Field>
-          <Field label="Coxa"><TextInput type="number" step="0.5" value={draft.coxa} onChange={set("coxa")} style={{ width: 90 }} /></Field>
-          <Field label="Panturrilha"><TextInput type="number" step="0.5" value={draft.panturrilha} onChange={set("panturrilha")} style={{ width: 90 }} /></Field>
+          {MEDIDAS.map((m) => (
+            <Field key={m.key} label={m.label}><TextInput type="number" step="0.5" value={draft[m.key]} onChange={set(m.key)} style={{ width: 90 }} /></Field>
+          ))}
         </div>
       </div>
 
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <Field label="Meta atual">
-          <Select value={draft.meta} onChange={set("meta")} style={{ width: 220 }}>
-            {Object.entries(GOALS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-          </Select>
-        </Field>
-        <Field label="Dias de treino disponíveis por semana">
-          <Select value={draft.frequenciaSemanal} onChange={set("frequenciaSemanal")} style={{ width: 100 }}>
-            {[2, 3, 4, 5, 6, 7].map((v) => <option key={v} value={v}>{v}</option>)}
-          </Select>
-        </Field>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <Field label="Meta atual">
+            <Select value={draft.meta} onChange={set("meta")} style={{ width: 240 }}>
+              {Object.entries(GOALS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </Select>
+          </Field>
+          <Field label="Dias de treino disponíveis por semana">
+            <Select value={draft.frequenciaSemanal} onChange={set("frequenciaSemanal")} style={{ width: 100 }}>
+              {[2, 3, 4, 5, 6, 7].map((v) => <option key={v} value={v}>{v}</option>)}
+            </Select>
+          </Field>
+        </div>
+        <div style={{ borderLeft: `3px solid ${COLORS.teal}`, background: COLORS.surface, borderRadius: 4, padding: "9px 12px", fontSize: 12.5, color: COLORS.textMid, lineHeight: 1.6 }}>
+          <b style={{ color: COLORS.textHi }}>{GOALS[draft.meta]}:</b> {GOAL_INFO[draft.meta]}
+        </div>
       </div>
 
-      <Field label="Observações" hint="opcional — lesões, preferências, restrições alimentares, etc.">
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 12.5, color: COLORS.textMid }}>
+          Questionário opcional {filled > 0 ? <span style={{ color: COLORS.teal }}>({filled} resposta{filled > 1 ? "s" : ""})</span> : null} — o que ficar em branco, o plano decide por você.
+        </div>
+
+        <QuestionGroup title="Sobre você" hint="usado também para calcular suas calorias e macros" defaultOpen={!!(draft.sexo || draft.idade || draft.alturaCm)}>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Field label="Sexo"><OptionSelect value={draft.sexo} onChange={set("sexo")} options={SEXO_OPCOES} width={150} /></Field>
+            <Field label="Idade"><TextInput type="number" min="18" placeholder="35" value={draft.idade} onChange={set("idade")} style={{ width: 90 }} /></Field>
+            <Field label="Altura (cm)"><TextInput type="number" placeholder="175" value={draft.alturaCm} onChange={set("alturaCm")} style={{ width: 100 }} /></Field>
+            <Field label="Peso desejado (kg)"><TextInput type="number" step="0.5" value={draft.pesoAlvo} onChange={set("pesoAlvo")} style={{ width: 120 }} /></Field>
+          </div>
+          <Field label="Como é o seu dia a dia fora do treino?"><OptionSelect value={draft.atividadeDiaria} onChange={set("atividadeDiaria")} options={ATIVIDADE_DIARIA_OPCOES} width={400} /></Field>
+        </QuestionGroup>
+
+        <QuestionGroup title="Seu treino" hint="experiência, local e preferências" defaultOpen={!!(draft.experiencia || draft.local || draft.divisao)}>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Field label="Experiência com musculação"><OptionSelect value={draft.experiencia} onChange={set("experiencia")} options={EXPERIENCIA_OPCOES} width={290} /></Field>
+            <Field label="Onde você treina"><OptionSelect value={draft.local} onChange={set("local")} options={LOCAL_OPCOES} width={290} /></Field>
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Field label="Tempo por sessão (min)">
+              <Select value={draft.tempoSessaoMin} onChange={set("tempoSessaoMin")} style={{ width: 130 }}>
+                <option value="">Não informar</option>
+                {TEMPO_SESSAO_OPCOES.map((v) => <option key={v} value={v}>{v}</option>)}
+              </Select>
+            </Field>
+            <Field label="Divisão do treino"><OptionSelect value={draft.divisao} onChange={set("divisao")} options={DIVISAO_OPCOES} width={290} /></Field>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ fontSize: 13, color: COLORS.textMid }}>Grupos musculares que quer priorizar <span style={{ color: COLORS.textFaint, fontSize: 11.5 }}>(opcional — toque para marcar)</span></span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {PRIORIDADES_OPCOES.map((o) => {
+                const on = draft.prioridades.includes(o.id);
+                return (
+                  <button key={o.id} type="button" onClick={() => togglePrioridade(o.id)} style={{
+                    background: on ? COLORS.tealSoft : "transparent", color: on ? COLORS.teal : COLORS.textMid,
+                    border: `1px solid ${on ? COLORS.teal : COLORS.line}`, borderRadius: 14, padding: "5px 12px", fontSize: 12.5, cursor: "pointer",
+                  }}>{o.label}</button>
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <Field label="Técnicas avançadas (drop set, bi-set…)"><OptionSelect value={draft.tecnicas} onChange={set("tecnicas")} options={TECNICAS_OPCOES} width={290} /></Field>
+            <Field label="Validade da ficha"><OptionSelect value={draft.cicloSemanas} onChange={set("cicloSemanas")} options={CICLO_OPCOES} width={220} /></Field>
+          </div>
+          <Field label="Cardio preferido"><OptionSelect value={draft.cardioPref} onChange={set("cardioPref")} options={CARDIO_OPCOES} width={290} /></Field>
+        </QuestionGroup>
+
+        <QuestionGroup title="Lesões e limitações" hint="para o plano evitar exercícios problemáticos" defaultOpen={!!draft.lesoes}>
+          <Field label="Dores, lesões ou restrições médicas" hint="ex.: dor no ombro direito, hérnia de disco. Não substitui orientação médica.">
+            <TextArea rows={2} value={draft.lesoes} onChange={set("lesoes")} />
+          </Field>
+        </QuestionGroup>
+      </div>
+
+      <Field label="Observações" hint="opcional — qualquer outra informação que ajude a montar a ficha">
         <TextArea rows={3} value={draft.metaObs} onChange={set("metaObs")} />
       </Field>
 
@@ -818,8 +843,9 @@ function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedid
 
       <PrimaryButton onClick={() => onSave(draft)} disabled={planLoading}>
         {planLoading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <Target size={15} />}
-        {planLoading ? "Atualizando plano…" : "Salvar avaliação e atualizar plano"}
+        {planLoading ? "Montando a ficha…" : "Salvar avaliação e gerar ficha"}
       </PrimaryButton>
+      {planLoading && <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: -12 }}>A ficha completa leva de 1 a 3 minutos. Mantenha o app aberto; você pode usar as outras abas enquanto isso.</div>}
 
       {assessments.length > 0 && (
         <div style={{ borderTop: `1px solid ${COLORS.line}`, paddingTop: 16 }}>
@@ -843,71 +869,192 @@ function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedid
 // ---------------------------------------------------------------------------
 // Plano
 // ---------------------------------------------------------------------------
-function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAssessment }) {
+function PlanExpiryBanner({ status, onPrimary, primaryLabel, loading }) {
+  if (!status || (!status.expired && !status.soon)) return null;
+  const expired = status.expired;
+  const motivo = expired
+    ? (status.bySessions && !status.byDate
+      ? `Você cumpriu as ${status.previstas} sessões de força previstas para esta ficha.`
+      : `A validade de ${status.semanas} semanas desta ficha terminou.`)
+    : (status.daysLeft <= 7
+      ? `Faltam ${Math.max(status.daysLeft, 0)} dia${status.daysLeft === 1 ? "" : "s"} para a validade da ficha.`
+      : `Você já fez ${status.done} das ${status.previstas} sessões previstas.`);
+  const color = expired ? COLORS.red : COLORS.amber;
+  return (
+    <div role="alert" style={{
+      display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 18,
+      border: `1px solid ${color}`, background: expired ? COLORS.redSoft : COLORS.amberSoft, borderRadius: 4, padding: "11px 14px",
+    }}>
+      <AlertTriangle size={18} color={color} style={{ flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 220, fontSize: 13.5, lineHeight: 1.5 }}>
+        <b style={{ color: COLORS.textHi }}>{expired ? "Seu treino venceu." : "Seu treino está perto de vencer."}</b>{" "}
+        <span style={{ color: COLORS.textMid }}>{motivo} {expired ? "Hora de renovar a ficha para continuar evoluindo." : "Vá pensando na renovação."}</span>
+      </div>
+      <button onClick={onPrimary} disabled={loading} style={{
+        background: expired ? COLORS.red : "transparent", color: expired ? "#fff" : COLORS.amber,
+        border: expired ? "none" : `1px solid ${COLORS.amber}`, borderRadius: 4, padding: "8px 14px", fontSize: 13, fontWeight: 600, cursor: loading ? "default" : "pointer",
+      }}>{loading ? "Gerando…" : primaryLabel}</button>
+    </div>
+  );
+}
+
+function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAssessment, status, macroResult, weightDate }) {
+  const phases = plan?.fases || [];
+  const currentIdx = status ? currentPhaseIndex(phases, status.semanaAtual) : 0;
+  const [phaseSel, setPhaseSel] = useState(null);
+  const phaseIdx = Math.min(phaseSel ?? currentIdx, Math.max(phases.length - 1, 0));
+
   if (!hasAssessment && !plan) {
     return (
-      <div style={{ maxWidth: 620 }}>
+      <div style={{ maxWidth: 620, display: "flex", flexDirection: "column", gap: 16 }}>
         <SectionTitle icon={Target} title="Plano atual" />
-        <div style={{ marginTop: 12 }}>
-          <EmptyState text="Nenhuma avaliação física registrada ainda." />
-          <div style={{ marginTop: 12 }}><GhostButton onClick={onGoToAssessment}>Preencher avaliação física</GhostButton></div>
-        </div>
+        <EmptyState text="Nenhuma avaliação física registrada ainda." />
+        <div><GhostButton onClick={onGoToAssessment}>Preencher avaliação física</GhostButton></div>
+        <MacroCard result={macroResult} weightDate={weightDate} onGoToAssessment={onGoToAssessment} />
       </div>
     );
   }
 
+  const legacy = plan && !plan.sessoes;
+
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 20, maxWidth: 640 }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 22, maxWidth: 680 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <SectionTitle icon={Target} title="Plano atual" />
         <PrimaryButton onClick={onRegenerate} disabled={loading}>
           {loading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={15} />}
-          {loading ? "Atualizando…" : "Atualizar com dados recentes"}
+          {loading ? "Montando a ficha…" : "Gerar nova ficha"}
         </PrimaryButton>
       </div>
+      {loading && <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: -12 }}>A ficha completa leva de 1 a 3 minutos. Mantenha o app aberto.</div>}
 
       {error && <div style={{ border: `1px solid #5C332E`, background: COLORS.redSoft, borderRadius: 4, padding: "10px 12px", fontSize: 13, color: "#E8A79A" }}>{error}</div>}
 
-      {!plan && !loading && !error && <EmptyState text="Gere o plano a partir da avaliação física preenchida." />}
+      {!plan && !loading && !error && <EmptyState text="Gere a ficha a partir da avaliação física preenchida." />}
 
-      {plan && (
+      <MacroCard result={macroResult} weightDate={weightDate} onGoToAssessment={onGoToAssessment} />
+
+      {legacy && (
+        <div style={{ border: `1px solid ${COLORS.amber}`, background: COLORS.amberSoft, borderRadius: 4, padding: "11px 14px", fontSize: 13.5, lineHeight: 1.5 }}>
+          Este plano foi criado no formato antigo (sem divisão A/B/C, descanso, técnicas e validade). Clique em <b>Gerar nova ficha</b> para receber a versão completa.
+        </div>
+      )}
+
+      {plan && !legacy && (
         <>
           <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: 14, fontSize: 13.5, lineHeight: 1.6 }}>{plan.resumoMeta}</div>
 
-          <div>
-            <SectionTitle icon={UtensilsCrossed} title="Metas diárias de macronutrientes" />
-            <div style={{ display: "flex", gap: 22, marginTop: 12, flexWrap: "wrap" }}>
-              <StatReadout label="Calorias" value={plan.metasMacro?.calorias_kcal} unit="kcal" />
-              <StatReadout label="Carboidratos" value={plan.metasMacro?.carboidratos_g} unit="g" />
-              <StatReadout label="Proteínas" value={plan.metasMacro?.proteinas_g} unit="g" />
-              <StatReadout label="Gorduras" value={plan.metasMacro?.gorduras_g} unit="g" />
-            </div>
+          <div style={{ display: "flex", gap: 22, flexWrap: "wrap", alignItems: "flex-start" }}>
+            <StatReadout label="Divisão" value={plan.divisao} />
+            {status && <StatReadout label="Validade" value={`${status.semanas}`} unit="semanas" sub={`até ${new Date(status.expiresAt).toLocaleDateString("pt-BR")}`} />}
+            {status && <StatReadout label="Sessões de força" value={`${status.done}/${status.previstas}`} sub={status.expired ? "ficha vencida" : `semana ${status.semanaAtual} de ${status.semanas}`} />}
           </div>
+          {plan.validade?.motivo && <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: -12 }}>{plan.validade.motivo}</div>}
 
-          {plan.proximoTreino && (
+          {phases.length > 0 && (
             <div>
-              <SectionTitle icon={Dumbbell} title="Treino de força sugerido" />
-              <div style={{ fontSize: 13, color: COLORS.textMid, marginTop: 6, marginBottom: 10 }}>{plan.proximoTreino.resumo}</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {(plan.proximoTreino.sessoes || []).map((sessao, i) => (
-                  <div key={i} style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "10px 12px" }}>
-                    <div style={{ fontSize: 13.5, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", color: COLORS.teal, marginBottom: 6 }}>{sessao.foco}</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      {(sessao.exercicios || []).map((ex, j) => (
-                        <div key={j} style={{ fontSize: 13, display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <span style={{ color: COLORS.textHi }}>{ex.nome}</span>
-                          <span style={{ color: COLORS.textMid }}>{ex.alvo}{ex.carga_sugerida ? ` · ${ex.carga_sugerida}` : ""}</span>
-                        </div>
-                      ))}
+              <SectionTitle icon={LineChartIcon} title="Fases da ficha" />
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                {phases.map((f, i) => (
+                  <div key={i} style={{ display: "flex", gap: 10, background: COLORS.surface, border: `1px solid ${i === currentIdx && status && !status.expired ? COLORS.teal : COLORS.line}`, borderRadius: 4, padding: "10px 12px" }}>
+                    <div style={{ width: 3, background: i === currentIdx ? COLORS.teal : COLORS.lineStrong, borderRadius: 2, flexShrink: 0 }} />
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif" }}>
+                        Fase {i + 1} · {f.nome} <span style={{ color: COLORS.textMid, fontWeight: 400 }}>(semanas {f.semanas})</span>
+                        {i === currentIdx && status && !status.expired ? <span style={{ color: COLORS.teal, fontSize: 11.5, marginLeft: 8 }}>você está aqui</span> : null}
+                      </div>
+                      <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 2, lineHeight: 1.5 }}>{f.foco}</div>
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           )}
-          <PlanBlock icon={Dumbbell} title="Orientações gerais de treino" data={plan.treino} />
-          <PlanBlock icon={LineChartIcon} title="Progressão de carga por exercício" data={plan.progressao} itemKeyA="exercicio" itemKeyB="sugestao" />
-          <PlanBlock icon={UtensilsCrossed} title="Alimentação" data={plan.alimentacao} />
+
+          {(plan.semanaTipo || []).length > 0 && (
+            <div>
+              <SectionTitle icon={CalendarDays} title="Semana tipo" />
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 6, marginTop: 10 }}>
+                {plan.semanaTipo.map((d, i) => (
+                  <div key={i} style={{ border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "7px 10px", background: COLORS.surface }}>
+                    <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>{d.dia}</div>
+                    <div style={{ fontSize: 12.5, color: /descanso/i.test(d.atividade) ? COLORS.textMid : COLORS.textHi, lineHeight: 1.4 }}>{d.atividade}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+              <SectionTitle icon={Dumbbell} title="Treinos" />
+              {phases.length > 1 && (
+                <Segmented value={phaseIdx} onChange={setPhaseSel} options={phases.map((f, i) => ({ id: i, label: `Fase ${i + 1}` }))} />
+              )}
+            </div>
+            {phases.length > 1 && <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 6 }}>Repetições da fase {phaseIdx + 1}: {phases[phaseIdx]?.nome}. Troque a fase acima para ver como elas mudam.</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 12 }}>
+              {plan.sessoes.map((s, i) => (
+                <div key={i} style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "12px 14px" }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif", color: COLORS.teal }}>
+                    Treino {s.id} — {s.foco}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>
+                    {s.duracao_min ? `~${s.duracao_min} min` : ""}{s.aquecimento ? `${s.duracao_min ? " · " : ""}Aquecimento: ${s.aquecimento}` : ""}
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", marginTop: 8 }}>
+                    {s.exercicios.map((ex, j) => (
+                      <div key={j} style={{ padding: "8px 0", borderTop: j ? `1px solid ${COLORS.line}` : "none" }}>
+                        <div style={{ display: "flex", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 13.5, color: COLORS.textHi }}>{j + 1}. {ex.nome}</span>
+                          <span style={{ fontSize: 13, fontFamily: "'Space Grotesk', sans-serif", color: COLORS.textHi }}>
+                            {ex.series} × {ex.reps[Math.min(phaseIdx, ex.reps.length - 1)]}
+                            {ex.descanso_s ? <span style={{ color: COLORS.textMid, fontWeight: 400 }}> · descanso {ex.descanso_s}s</span> : null}
+                          </span>
+                        </div>
+                        {ex.tecnica && (
+                          <div style={{ fontSize: 12, color: COLORS.amber, marginTop: 3, lineHeight: 1.45 }}>Técnica: {ex.tecnica}</div>
+                        )}
+                        {(ex.carga_sugerida || ex.obs) && (
+                          <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 3, lineHeight: 1.45 }}>{[ex.carga_sugerida, ex.obs].filter(Boolean).join(" · ")}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {plan.cardio?.itens?.length > 0 && (
+            <div>
+              <SectionTitle icon={HeartPulse} title="Cardio" />
+              <div style={{ fontSize: 13, color: COLORS.textMid, marginTop: 6, marginBottom: 10 }}>{plan.cardio.resumo}</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {plan.cardio.itens.map((c, i) => (
+                  <div key={i} style={{ display: "flex", gap: 10, background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "10px 12px" }}>
+                    <div style={{ width: 3, background: COLORS.amber, borderRadius: 2, flexShrink: 0 }} />
+                    <div>
+                      <div style={{ fontSize: 13.5, fontWeight: 600, fontFamily: "'Space Grotesk', sans-serif" }}>{c.tipo}</div>
+                      <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 2, lineHeight: 1.5 }}>{[c.frequencia, c.duracao, c.intensidade].filter(Boolean).join(" · ")}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <PlanBlock icon={LineChartIcon} title="Progressão de carga" data={plan.progressao} itemKeyA="exercicio" itemKeyB="sugestao" />
+
+          {plan.suposicoes?.length > 0 && (
+            <div>
+              <SectionTitle icon={Ruler} title="O que o plano assumiu" />
+              <ul style={{ marginTop: 10, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 6 }}>
+                {plan.suposicoes.map((t, i) => <li key={i} style={{ fontSize: 12.5, color: COLORS.textMid, lineHeight: 1.5 }}>{t}</li>)}
+              </ul>
+              <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginTop: 6 }}>Preencha o questionário na Avaliação para trocar suposições por dados reais.</div>
+            </div>
+          )}
 
           {plan.insights?.length > 0 && (
             <div>
@@ -1026,7 +1173,7 @@ function PanelSection({ icon, title, right, note, children }) {
   );
 }
 
-function PainelTab({ logs, sortedDates, bodySeries, measureSeries, exerciseCatalog, latestAssessment, todayMacros, macroTargets }) {
+function PainelTab({ logs, sortedDates, bodySeries, measureSeries, exerciseCatalog, latestAssessment }) {
   const today = todayISO();
   const [period, setPeriod] = useState(90);
   const [compMode, setCompMode] = useState("pct");
@@ -1035,7 +1182,6 @@ function PainelTab({ logs, sortedDates, bodySeries, measureSeries, exerciseCatal
 
   const start = periodStart(today, period);
   const weeks = period === "all" ? 26 : Math.min(26, Math.max(4, Math.ceil(period / 7)));
-  const kcalDays = period === "all" ? 90 : Math.min(period, 90);
 
   // ---- composição corporal (a média móvel é calculada antes de recortar o período)
   const bodyAll = useMemo(() => withMovingAverage(bodySeries, "peso", 7), [bodySeries]);
@@ -1068,10 +1214,6 @@ function PainelTab({ logs, sortedDates, bodySeries, measureSeries, exerciseCatal
   );
   const minutes = useMemo(() => buildWeeklyMinutes(logs, sortedDates, today, weeks), [logs, sortedDates, today, weeks]);
   const hasMinutes = minutes.some((r) => r.forca > 0 || r.cardio > 0);
-
-  // ---- calorias
-  const calories = useMemo(() => buildCalorieSeries(logs, sortedDates, today, kcalDays), [logs, sortedDates, today, kcalDays]);
-  const kcalTarget = macroTargets?.calorias_kcal;
 
   // ---- constância
   const metaDias = latestAssessment?.frequenciaSemanal ? Number(latestAssessment.frequenciaSemanal) : null;
@@ -1321,52 +1463,6 @@ function PainelTab({ logs, sortedDates, bodySeries, measureSeries, exerciseCatal
         )}
       </PanelSection>
 
-      {/* 5. Calorias */}
-      <PanelSection
-        icon={UtensilsCrossed} title="Calorias por dia"
-        note={
-          <>
-            {calories.mediaKcal != null
-              ? <>Média dos dias normais: <b style={{ color: COLORS.textHi }}>{fmtNum(calories.mediaKcal, 0)} kcal</b> ({calories.diasMedia} dia{calories.diasMedia === 1 ? "" : "s"}, sem contar dias do lixo){kcalTarget ? <>; meta do plano: {fmtNum(kcalTarget, 0)} kcal</> : null}. </>
-              : null}
-            {calories.mediaProteina7d != null && (
-              <>Proteína, média dos últimos 7 dias: <b style={{ color: COLORS.textHi }}>{fmtNum(calories.mediaProteina7d, 0)} g</b>{macroTargets?.proteinas_g ? <> (meta {fmtNum(macroTargets.proteinas_g, 0)} g)</> : null}. </>
-            )}
-            {(period === "all" || period > 90) && "Mostrando os últimos 90 dias."}
-          </>
-        }
-      >
-        {calories.rows.length > 0 ? (
-          <div style={{ height: 230 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={calories.rows} margin={{ right: 30 }}>
-                <CartesianGrid stroke={COLORS.line} strokeDasharray="3 3" />
-                <XAxis dataKey="label" stroke={COLORS.textFaint} fontSize={11.5} tickLine={false} minTickGap={20} />
-                <YAxis stroke={COLORS.textFaint} fontSize={11.5} tickLine={false} width={42}
-                  domain={[0, (dataMax) => Math.ceil((Math.max(dataMax, kcalTarget || 0) * 1.1) / 100) * 100]} />
-                <Tooltip {...TOOLTIP} formatter={(v, name) => [`${fmtNum(v, 0)} kcal`, name]} />
-                <Legend wrapperStyle={{ fontSize: 12.5 }} />
-                {kcalTarget ? <ReferenceLine y={kcalTarget} stroke={COLORS.textHi} strokeDasharray="5 4" label={{ value: "Meta", fill: COLORS.textMid, fontSize: 11, position: "right" }} /> : null}
-                <Bar dataKey="normal" stackId="k" name="Dia normal" fill={COLORS.teal} />
-                <Bar dataKey="estimado" stackId="k" name="Só calorias (estimado)" fill="#6D8CB0" />
-                <Bar dataKey="lixo" stackId="k" name="Dia do lixo" fill={COLORS.amber} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        ) : (
-          <EmptyState text="Nenhuma caloria registrada neste período." />
-        )}
-      </PanelSection>
-
-      <div>
-        <SectionTitle icon={UtensilsCrossed} title="Macronutrientes de hoje" />
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 12, maxWidth: 340 }}>
-          <MacroBar label="Calorias" value={todayMacros.calorias_kcal} target={macroTargets?.calorias_kcal} unit=" kcal" />
-          <MacroBar label="Carboidratos" value={todayMacros.carboidratos_g} target={macroTargets?.carboidratos_g} unit="g" />
-          <MacroBar label="Proteínas" value={todayMacros.proteinas_g} target={macroTargets?.proteinas_g} unit="g" />
-          <MacroBar label="Gorduras" value={todayMacros.gorduras_g} target={macroTargets?.gorduras_g} unit="g" />
-        </div>
-      </div>
     </div>
   );
 }
@@ -1393,7 +1489,6 @@ function HistoricoTab({ sortedDates, logs, onSelect, onDelete }) {
                 {Object.values(e.medidas || {}).some((v) => v !== "" && v != null) && <span>medidas</span>}
                 <span>{(e.strengthWorkouts || []).length} treino(s) de força</span>
                 <span>{(e.cardioWorkouts || []).length} cardio</span>
-                <span>{(e.meals || []).length} refeição(ões)</span>
               </div>
               <IconButton onClick={() => onDelete(d)} danger title="Excluir dia"><Trash2 size={14} /></IconButton>
             </div>
