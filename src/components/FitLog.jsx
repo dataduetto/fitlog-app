@@ -1,19 +1,19 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, Legend
 } from "recharts";
 import {
   Dumbbell, HeartPulse, UtensilsCrossed, LineChart as LineChartIcon,
-  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut, AlertTriangle, History
+  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut, AlertTriangle, History, Check, Repeat, Play
 } from "lucide-react";
 import { loadState, persistState, emptyState } from "../lib/storage";
-import { classifyExercise, generatePlanFromContext } from "../lib/claude";
+import { classifyExercise, generatePlanFromContext, suggestAlternatives } from "../lib/claude";
 import { estimateMacros, macroInputFrom } from "../lib/nutrition";
 import { planStatus, currentPhaseIndex } from "../lib/planStatus";
 import {
   GOALS, GOAL_INFO, SEXO_OPCOES, ATIVIDADE_DIARIA_OPCOES, EXPERIENCIA_OPCOES, LOCAL_OPCOES, DIVISAO_OPCOES,
-  TECNICAS_OPCOES, CICLO_OPCOES, CARDIO_OPCOES, PRIORIDADES_OPCOES, TEMPO_SESSAO_OPCOES,
+  TECNICAS_OPCOES, CICLO_OPCOES, ORGANIZACAO_OPCOES, CARDIO_OPCOES, PRIORIDADES_OPCOES, TEMPO_SESSAO_OPCOES,
 } from "../lib/goals";
 import { debounce } from "../lib/debounce";
 import {
@@ -238,7 +238,34 @@ export default function FitLog({ userId, onLogout, userEmail }) {
   }, [userId]);
 
   // Grava no Supabase com debounce — evita uma escrita a cada tecla digitada.
-  const debouncedPersist = useMemo(() => debounce((s) => persistState(userId, s), 600), [userId]);
+  const [saveStatus, setSaveStatus] = useState({ state: "idle", at: null }); // idle | pending | saving | saved | error
+  const latestRef = useRef(null);
+  const pendingRef = useRef(false);
+  const doPersist = useCallback(async (s) => {
+    pendingRef.current = false;
+    setSaveStatus((p) => ({ ...p, state: "saving" }));
+    let ok = false;
+    try { ok = (await persistState(userId, s)) !== false; } catch (e) { ok = false; }
+    setSaveStatus((p) => (ok ? { state: "saved", at: new Date() } : { state: "error", at: p.at }));
+    return ok;
+  }, [userId]);
+  const debounced = useMemo(() => debounce(doPersist, 600), [doPersist]);
+  const debouncedPersist = useCallback((s) => {
+    latestRef.current = s;
+    pendingRef.current = true;
+    queueMicrotask(() => setSaveStatus((p) => (p.state === "pending" ? p : { ...p, state: "pending" })));
+    debounced(s);
+  }, [debounced]);
+  // Botão "Salvar registro": grava agora, sem esperar o salvamento automático.
+  const saveNow = useCallback(() => { debounced.flush(latestRef.current ?? state); }, [debounced, state]);
+  // Ao esconder ou fechar a página com algo ainda pendente, tenta gravar na hora.
+  useEffect(() => {
+    const flushIfPending = () => { if (pendingRef.current && latestRef.current) debounced.flush(latestRef.current); };
+    const onHide = () => { if (document.visibilityState === "hidden") flushIfPending(); };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", flushIfPending);
+    return () => { document.removeEventListener("visibilitychange", onHide); window.removeEventListener("pagehide", flushIfPending); };
+  }, [debounced]);
 
   const commit = useCallback((next) => { setState(next); debouncedPersist(next); }, [debouncedPersist]);
   // Versão "funcional": parte do estado mais recente, não do que existia quando a função foi criada.
@@ -251,6 +278,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     });
   }, [debouncedPersist]);
   const { logs, assessments, currentPlan, exerciseCatalog } = state;
+  const indisponiveis = state.indisponiveis || [];
   const day = logs[selectedDate] || emptyDay(selectedDate);
   const latestAssessment = assessments.length ? assessments[assessments.length - 1] : null;
 
@@ -323,6 +351,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
       treinosForcaRecentes: recentDates.flatMap((d) => (logs[d].strengthWorkouts || []).map((s) => ({ data: d, ...s }))),
       treinosCardioRecentes: recentDates.flatMap((d) => (logs[d].cardioWorkouts || []).map((c) => ({ data: d, ...c }))),
       catalogoExercicios: exerciseCatalog || {},
+      exerciciosIndisponiveis: indisponiveis,
       metasMacro: macroResult.ok
         ? { calorias_kcal: macroResult.calorias_kcal, proteinas_g: macroResult.proteinas_g, carboidratos_g: macroResult.carboidratos_g, gorduras_g: macroResult.gorduras_g }
         : null,
@@ -331,7 +360,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
         sessoes: currentPlan.sessoes.map((x) => ({ id: x.id, foco: x.foco, exercicios: x.exercicios.map((e) => `${e.nome} ${e.series}x${e.reps?.[0] ?? ""}`) })),
       } : null,
     };
-  }, [sortedDates, assessments, bodySeries, measureSeries, logs, exerciseCatalog, macroResult, currentPlan]);
+  }, [sortedDates, assessments, bodySeries, measureSeries, logs, exerciseCatalog, macroResult, currentPlan, indisponiveis]);
 
   const generatePlan = async (assessment) => {
     const useAssessment = assessment || latestAssessment;
@@ -351,6 +380,33 @@ export default function FitLog({ userId, onLogout, userEmail }) {
       setPlanLoading(false);
     }
   };
+
+  // ---- troca de exercício (equipamento que não existe na academia)
+  const patchExercise = (si, ei, fn, indispFn) => commitWith((prev) => {
+    const plan = prev.currentPlan;
+    if (!plan?.sessoes?.[si]?.exercicios?.[ei]) return prev;
+    const sessoes = plan.sessoes.map((sess, i) => (i !== si ? sess : {
+      ...sess, exercicios: sess.exercicios.map((e, j) => (j !== ei ? e : fn(e))),
+    }));
+    return { ...prev, currentPlan: { ...plan, sessoes }, indisponiveis: indispFn(prev.indisponiveis || [], plan.sessoes[si].exercicios[ei]) };
+  });
+  const swapExercise = (si, ei, alt) => patchExercise(
+    si, ei,
+    (e) => ({
+      ...e, nome: alt.nome, pegada: alt.pegada || null, obs: alt.obs || "",
+      original: e.original || { nome: e.nome, pegada: e.pegada ?? null, obs: e.obs || "" },
+    }),
+    (list, e) => Array.from(new Set([...list, (e.original || e).nome])).slice(-40)
+  );
+  const restoreExercise = (si, ei) => patchExercise(
+    si, ei,
+    (e) => (e.original ? { ...e, nome: e.original.nome, pegada: e.original.pegada, obs: e.original.obs, original: undefined } : e),
+    (list, e) => (e.original ? list.filter((n) => n !== e.original.nome) : list)
+  );
+  const suggestFor = (sessao, ex) => suggestAlternatives({
+    exercicio: ex.original ? ex.original.nome : ex.nome, foco: sessao.foco, local: latestAssessment?.local,
+    evitar: [...indisponiveis, ...(currentPlan?.sessoes || []).flatMap((x) => x.exercicios.map((e) => e.nome))],
+  });
 
   // Remove campos vazios (o plano trata ausência como "sem preferência").
   const cleanAssessment = (a) => Object.fromEntries(
@@ -465,6 +521,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
               onClassifyExercise={ensureExerciseClassified}
               macroResult={macroResult} weightDate={latestWeight?.date}
               onGoToAssessment={() => setTab("avaliacao")}
+              saveStatus={saveStatus} onSave={saveNow}
             />
           )}
           {tab === "avaliacao" && (
@@ -478,7 +535,8 @@ export default function FitLog({ userId, onLogout, userEmail }) {
             <PlanoTab plan={currentPlan} loading={planLoading} error={planError}
               onRegenerate={() => generatePlan(latestAssessment)} hasAssessment={!!latestAssessment}
               onGoToAssessment={() => setTab("avaliacao")}
-              status={pStatus} macroResult={macroResult} weightDate={latestWeight?.date} />
+              status={pStatus} macroResult={macroResult} weightDate={latestWeight?.date}
+              onSuggest={suggestFor} onSwap={swapExercise} onRestore={restoreExercise} />
           )}
           {tab === "painel" && (
             <PainelTab logs={logs} sortedDates={sortedDates} bodySeries={bodySeries} measureSeries={measureSeries}
@@ -498,7 +556,7 @@ export default function FitLog({ userId, onLogout, userEmail }) {
 // ---------------------------------------------------------------------------
 // Registro
 // ---------------------------------------------------------------------------
-function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, macroResult, weightDate, onGoToAssessment }) {
+function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, macroResult, weightDate, onGoToAssessment, saveStatus, onSave }) {
   const [exerciseList, setExerciseList] = useState([]);
   const [exerciseDraft, setExerciseDraft] = useState({ nome: "", carga_kg: "", esquema: "" });
   const [sessionDraft, setSessionDraft] = useState({ duracao: "", hr_avg: "", hr_max: "", calorias: "", rpe: "7" });
@@ -681,6 +739,37 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
         </div>
       </section>
 
+      <SaveBar
+        status={saveStatus} onSave={onSave}
+        warning={exerciseList.length > 0
+          ? "Você tem exercícios ainda fora de uma sessão: clique em \"Salvar sessão\" no treino de força."
+          : (cardioDraft.duracao ? "Há um cardio preenchido ainda não salvo: clique em \"Salvar\" no treino cardiovascular." : "")}
+      />
+    </div>
+  );
+}
+
+function SaveBar({ status, onSave, warning }) {
+  const st = status?.state || "idle";
+  const hhmm = status?.at ? status.at.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" }) : null;
+  const msg = {
+    idle: hhmm ? `Salvo às ${hhmm}` : "Tudo que você lança é salvo sozinho em poucos segundos.",
+    pending: "Alterações a caminho… (salva sozinho em instantes)",
+    saving: "Salvando…",
+    saved: `Registro salvo às ${hhmm}`,
+    error: "Não foi possível salvar. Verifique a internet e toque em Salvar registro.",
+  }[st];
+  const color = st === "error" ? COLORS.red : st === "saved" ? COLORS.teal : COLORS.textMid;
+  return (
+    <div style={{ position: "sticky", bottom: 0, background: COLORS.bg, borderTop: `1px solid ${COLORS.line}`, padding: "10px 0", marginTop: -8, zIndex: 5 }}>
+      {warning && <div style={{ fontSize: 12.5, color: COLORS.amber, marginBottom: 8, lineHeight: 1.45 }}>{warning}</div>}
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+        <PrimaryButton onClick={onSave} disabled={st === "saving"}>
+          {st === "saving" ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : st === "saved" ? <Check size={15} /> : null}
+          {st === "saved" ? "Salvo" : "Salvar registro"}
+        </PrimaryButton>
+        <span role="status" style={{ fontSize: 12.5, color }}>{msg}</span>
+      </div>
     </div>
   );
 }
@@ -710,7 +799,7 @@ function OptionSelect({ value, onChange, options, width = 280, emptyLabel = "Nã
 
 const PROFILE_KEYS = [
   "sexo", "idade", "alturaCm", "atividadeDiaria", "experiencia", "local", "tempoSessaoMin", "divisao",
-  "tecnicas", "cicloSemanas", "cardioPref", "pesoAlvo", "lesoes",
+  "tecnicas", "cicloSemanas", "organizacaoSemana", "cardioPref", "pesoAlvo", "lesoes",
 ];
 
 function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedidas, latestBodyFat, onSave, planLoading, planError }) {
@@ -823,6 +912,7 @@ function AvaliacaoTab({ latestAssessment, assessments, latestWeight, latestMedid
             <Field label="Técnicas avançadas (drop set, bi-set…)"><OptionSelect value={draft.tecnicas} onChange={set("tecnicas")} options={TECNICAS_OPCOES} width={290} /></Field>
             <Field label="Validade da ficha"><OptionSelect value={draft.cicloSemanas} onChange={set("cicloSemanas")} options={CICLO_OPCOES} width={220} /></Field>
           </div>
+          <Field label="Como seguir a semana"><OptionSelect value={draft.organizacaoSemana} onChange={set("organizacaoSemana")} options={ORGANIZACAO_OPCOES} width={340} /></Field>
           <Field label="Cardio preferido"><OptionSelect value={draft.cardioPref} onChange={set("cardioPref")} options={CARDIO_OPCOES} width={290} /></Field>
         </QuestionGroup>
 
@@ -898,7 +988,7 @@ function PlanExpiryBanner({ status, onPrimary, primaryLabel, loading }) {
   );
 }
 
-function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAssessment, status, macroResult, weightDate }) {
+function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAssessment, status, macroResult, weightDate, onSuggest, onSwap, onRestore }) {
   const phases = plan?.fases || [];
   const currentIdx = status ? currentPhaseIndex(phases, status.semanaAtual) : 0;
   const [phaseSel, setPhaseSel] = useState(null);
@@ -982,6 +1072,7 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
                   </div>
                 ))}
               </div>
+              {plan.como_seguir && <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 8, lineHeight: 1.55 }}>{plan.como_seguir}</div>}
             </div>
           )}
 
@@ -1004,21 +1095,8 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", marginTop: 8 }}>
                     {s.exercicios.map((ex, j) => (
-                      <div key={j} style={{ padding: "8px 0", borderTop: j ? `1px solid ${COLORS.line}` : "none" }}>
-                        <div style={{ display: "flex", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
-                          <span style={{ fontSize: 13.5, color: COLORS.textHi }}>{j + 1}. {ex.nome}</span>
-                          <span style={{ fontSize: 13, fontFamily: "'Space Grotesk', sans-serif", color: COLORS.textHi }}>
-                            {ex.series} × {ex.reps[Math.min(phaseIdx, ex.reps.length - 1)]}
-                            {ex.descanso_s ? <span style={{ color: COLORS.textMid, fontWeight: 400 }}> · descanso {ex.descanso_s}s</span> : null}
-                          </span>
-                        </div>
-                        {ex.tecnica && (
-                          <div style={{ fontSize: 12, color: COLORS.amber, marginTop: 3, lineHeight: 1.45 }}>Técnica: {ex.tecnica}</div>
-                        )}
-                        {(ex.carga_sugerida || ex.obs) && (
-                          <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 3, lineHeight: 1.45 }}>{[ex.carga_sugerida, ex.obs].filter(Boolean).join(" · ")}</div>
-                        )}
-                      </div>
+                      <ExerciseRow key={`${i}-${j}-${ex.nome}`} ex={ex} index={j} phaseIdx={phaseIdx}
+                        onSuggest={() => onSuggest(s, ex)} onSwap={(alt) => onSwap(i, j, alt)} onRestore={() => onRestore(i, j)} />
                     ))}
                   </div>
                 </div>
@@ -1070,6 +1148,75 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
     </div>
   );
 }
+
+function ExerciseRow({ ex, index, phaseIdx, onSuggest, onSwap, onRestore }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [options, setOptions] = useState(null);
+  const [err, setErr] = useState("");
+  const [manual, setManual] = useState("");
+
+  const ask = async () => {
+    setOpen(true); setLoading(true); setErr(""); setOptions(null);
+    try {
+      const list = await onSuggest();
+      if (list.length === 0) setErr("A IA não devolveu opções. Tente de novo ou digite o exercício.");
+      setOptions(list);
+    } catch (e) { setErr(`Não foi possível buscar alternativas: ${e?.message || "erro"}`); }
+    finally { setLoading(false); }
+  };
+  const choose = (alt) => { onSwap(alt); setOpen(false); setOptions(null); setManual(""); };
+
+  return (
+    <div style={{ padding: "8px 0", borderTop: index ? `1px solid ${COLORS.line}` : "none" }}>
+      <div style={{ display: "flex", gap: 10, justifyContent: "space-between", flexWrap: "wrap" }}>
+        <span style={{ fontSize: 13.5, color: COLORS.textHi }}>{index + 1}. {ex.nome}</span>
+        <span style={{ fontSize: 13, fontFamily: "'Space Grotesk', sans-serif", color: COLORS.textHi }}>
+          {ex.series} × {ex.reps[Math.min(phaseIdx, ex.reps.length - 1)]}
+          {ex.descanso_s ? <span style={{ color: COLORS.textMid, fontWeight: 400 }}> · descanso {ex.descanso_s}s</span> : null}
+        </span>
+      </div>
+      <a href={`https://www.youtube.com/results?search_query=${encodeURIComponent(`como fazer ${ex.nome} execução correta`)}`}
+        target="_blank" rel="noopener noreferrer" style={{ ...linkBtn, textDecoration: "none", display: "inline-flex", alignItems: "center", gap: 5, marginTop: 4 }}>
+        <Play size={12} />Ver execução no YouTube
+      </a>
+      {ex.pegada && <div style={{ fontSize: 12, color: COLORS.textHi, marginTop: 3, lineHeight: 1.45 }}><span style={{ color: COLORS.textMid }}>Pegada:</span> {ex.pegada}</div>}
+      {ex.tecnica && <div style={{ fontSize: 12, color: COLORS.amber, marginTop: 3, lineHeight: 1.45 }}>Técnica: {ex.tecnica}</div>}
+      {(ex.carga_sugerida || ex.obs) && (
+        <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: 3, lineHeight: 1.45 }}>{[ex.carga_sugerida, ex.obs].filter(Boolean).join(" · ")}</div>
+      )}
+      <div style={{ display: "flex", gap: 14, marginTop: 5, alignItems: "center", flexWrap: "wrap" }}>
+        {ex.original && <span style={{ fontSize: 11.5, color: COLORS.textFaint }}>Trocado (original: {ex.original.nome})</span>}
+        {ex.original && <button onClick={onRestore} style={linkBtn}>Voltar ao original</button>}
+        {!open && <button onClick={ask} style={{ ...linkBtn, display: "inline-flex", alignItems: "center", gap: 5 }}><Repeat size={12} />Não tem na minha academia</button>}
+      </div>
+      {open && (
+        <div style={{ marginTop: 8, border: `1px solid ${COLORS.lineStrong}`, borderRadius: 4, padding: 10, background: COLORS.bg }}>
+          <div style={{ fontSize: 12, color: COLORS.textMid, marginBottom: 8 }}>Substitutos para <b style={{ color: COLORS.textHi }}>{ex.original ? ex.original.nome : ex.nome}</b>:</div>
+          {loading && <div style={{ fontSize: 12.5, color: COLORS.textMid, display: "flex", gap: 6, alignItems: "center" }}><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />Buscando alternativas…</div>}
+          {err && <div style={{ fontSize: 12.5, color: "#E8A79A", marginBottom: 6 }}>{err}</div>}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {(options || []).map((o, k) => (
+              <button key={k} onClick={() => choose(o)} style={{ textAlign: "left", background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "8px 10px", cursor: "pointer", color: COLORS.textHi }}>
+                <div style={{ fontSize: 13 }}>{o.nome}</div>
+                {(o.pegada || o.obs) && <div style={{ fontSize: 11.5, color: COLORS.textMid, marginTop: 2 }}>{[o.pegada && `Pegada: ${o.pegada}`, o.obs].filter(Boolean).join(" · ")}</div>}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+            <TextInput placeholder="Ou digite o exercício que você fará" value={manual} onChange={(e) => setManual(e.target.value)} style={{ flex: 1, minWidth: 180 }} />
+            <GhostButton onClick={() => manual.trim() && choose({ nome: manual.trim(), pegada: null, obs: "" })}>Usar este</GhostButton>
+          </div>
+          <div style={{ display: "flex", gap: 14, marginTop: 8 }}>
+            <button onClick={ask} style={linkBtn} disabled={loading}>Outras opções</button>
+            <button onClick={() => setOpen(false)} style={linkBtn}>Cancelar</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+const linkBtn = { background: "none", border: "none", color: COLORS.teal, fontSize: 12, cursor: "pointer", padding: 0 };
 
 function PlanBlock({ icon, title, data, itemKeyA = "foco", itemKeyB = "detalhe" }) {
   if (!data) return null;

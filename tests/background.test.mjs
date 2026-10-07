@@ -65,6 +65,8 @@ assert.equal(jobs.j1.status, "done");
 assert.equal(jobs.j1.result.sessoes[0].exercicios[0].reps.length, 2);   // reps normalizadas por fase
 assert.equal(jobs.j1.result.validade.sessoes_previstas, 8);              // 1 sessão × 8 semanas
 assert.equal(jobs.j1.result.versao, 2);
+assert.equal(jobs.j1.result.sessoes[0].exercicios[0].pegada, null);   // sem pegada vira null
+assert.match(calls[0].system, /pegada/); assert.match(calls[0].system, /exerciciosIndisponiveis/); assert.match(calls[0].system, /como_seguir/); assert.match(calls[0].system, /2 dias → AB/);
 assert.equal(calls[0].max_tokens, 16000);
 assert.equal(calls[0].thinking, undefined);                              // raciocínio ligado
 assert.ok(calls[0].messages[0].content.includes("hipertrofia"));

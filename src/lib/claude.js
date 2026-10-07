@@ -56,6 +56,23 @@ Responda APENAS com um JSON válido, sem markdown, sem crase, no formato exato:
   });
 }
 
+/**
+ * Sugere exercícios substitutos quando o equipamento não existe na academia.
+ * Chamada curta e barata (sem raciocínio). Devolve [{nome, pegada, obs}].
+ */
+export async function suggestAlternatives({ exercicio, foco, motivo, local, evitar = [] }) {
+  const res = await callClaude({
+    system: `Você é um treinador de musculação. O usuário não consegue fazer um exercício da ficha porque não há o equipamento na academia dele. Sugira 4 exercícios substitutos que treinem o mesmo grupo muscular com o mesmo padrão de movimento e a mesma intensidade, usando equipamentos comuns (halteres, barras, polias, máquinas básicas, peso corporal). Não repita o exercício original nem nada da lista "evitar". Se a execução depende da pegada, informe-a (ex.: "pronada, na largura dos ombros"); senão use null.
+Responda APENAS com um JSON válido, sem markdown, no formato exato:
+{"alternativas": [{"nome": "string", "pegada": "string ou null", "obs": "string curta sobre a execução ou o equipamento necessário"}]}`,
+    user: JSON.stringify({ exercicio, focoDaSessao: foco, motivo: motivo || "equipamento indisponível", localDeTreino: local || null, evitar }),
+    maxTokens: 600,
+    noThinking: true,
+  });
+  const list = Array.isArray(res?.alternativas) ? res.alternativas : [];
+  return list.filter((a) => a && typeof a.nome === "string" && a.nome.trim()).slice(0, 5);
+}
+
 const POLL_MS = 3000;
 const POLL_LIMIT_MS = 8 * 60 * 1000;
 

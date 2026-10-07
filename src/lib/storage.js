@@ -1,7 +1,7 @@
 import { supabase } from "./supabaseClient";
 
 // Estado inicial vazio — mesmo formato usado dentro do componente FitLog.
-export const emptyState = { logs: {}, assessments: [], currentPlan: null, exerciseCatalog: {} };
+export const emptyState = { logs: {}, assessments: [], currentPlan: null, exerciseCatalog: {}, indisponiveis: [] };
 
 /**
  * Carrega o estado salvo do usuário logado a partir da tabela app_state.
@@ -31,7 +31,7 @@ export async function loadState(userId) {
  * disparar uma escrita no banco a cada tecla digitada.
  */
 export async function persistState(userId, state) {
-  if (!userId) return;
+  if (!userId) return true;
   const { error } = await supabase
     .from("app_state")
     .upsert(
@@ -42,5 +42,7 @@ export async function persistState(userId, state) {
   if (error) {
     // eslint-disable-next-line no-console
     console.error("Falha ao salvar estado no Supabase:", error);
+    return false;
   }
+  return true;
 }

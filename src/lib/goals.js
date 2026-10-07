@@ -47,9 +47,10 @@ export const LOCAL_OPCOES = [
 ];
 
 export const DIVISAO_OPCOES = [
-  { id: "", label: "Deixar o plano escolher" },
+  { id: "", label: "Deixar o plano escolher pelos dias (recomendado)" },
   { id: "fullbody", label: "Corpo inteiro (full body)" },
   { id: "upper_lower", label: "Superior / inferior" },
+  { id: "ab", label: "AB (2 treinos: ex. superior e inferior)" },
   { id: "abc", label: "ABC" },
   { id: "abcd", label: "ABCD" },
   { id: "abcde", label: "ABCDE" },
@@ -68,6 +69,12 @@ export const CICLO_OPCOES = [
   { id: "6", label: "6 semanas" },
   { id: "8", label: "8 semanas" },
   { id: "12", label: "12 semanas" },
+];
+
+export const ORGANIZACAO_OPCOES = [
+  { id: "", label: "Deixar o plano escolher (sequência)" },
+  { id: "sequencia", label: "Sequência: A, B, C… continua de onde parou" },
+  { id: "fixo", label: "Dias fixos da semana" },
 ];
 
 export const CARDIO_OPCOES = [
