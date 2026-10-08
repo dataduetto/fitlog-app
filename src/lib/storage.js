@@ -1,7 +1,7 @@
 import { supabase } from "./supabaseClient";
 
 // Estado inicial vazio — mesmo formato usado dentro do componente FitLog.
-export const emptyState = { logs: {}, assessments: [], currentPlan: null, exerciseCatalog: {}, indisponiveis: [] };
+export const emptyState = { logs: {}, assessments: [], currentPlan: null, exerciseCatalog: {}, indisponiveis: [], rascunhos: {} };
 
 /**
  * Carrega o estado salvo do usuário logado a partir da tabela app_state.

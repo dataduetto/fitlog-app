@@ -5,7 +5,8 @@ import {
 } from "recharts";
 import {
   Dumbbell, HeartPulse, UtensilsCrossed, LineChart as LineChartIcon,
-  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut, AlertTriangle, History, Check, Repeat, Play
+  Sparkles, Trash2, Plus, CalendarDays, Loader2, RefreshCw, Ruler, Target, LogOut, AlertTriangle, History, Check, Repeat, Play,
+  Download, FileText, Image as ImageIcon, ChevronDown, ChevronUp, ClipboardList
 } from "lucide-react";
 import { loadState, persistState, emptyState } from "../lib/storage";
 import { classifyExercise, generatePlanFromContext, suggestAlternatives } from "../lib/claude";
@@ -16,6 +17,9 @@ import {
   TECNICAS_OPCOES, CICLO_OPCOES, ORGANIZACAO_OPCOES, CARDIO_OPCOES, PRIORIDADES_OPCOES, TEMPO_SESSAO_OPCOES,
 } from "../lib/goals";
 import { debounce } from "../lib/debounce";
+import {
+  normalizeDraft, setDraftFor, emptyDraft, repsFor, esquemaFromPlan, lastLoadsUntil, suggestNextTreino, findInPlan, exerciseKey,
+} from "../lib/registroDraft";
 import {
   MEDIDAS, DEFAULT_SETS, periodStart, buildBodySeries, withMovingAverage, filterFrom,
   firstLastDelta, buildMeasureSeries, latestMeasures, measureHistoryForPlan, buildLoadSeries,
@@ -300,6 +304,21 @@ export default function FitLog({ userId, onLogout, userEmail }) {
     commit({ ...state, logs: { ...logs, [selectedDate]: nextDay } });
   }, [state, logs, selectedDate, commit]);
 
+  // Rascunho do Registro (exercícios ainda fora de uma sessão, campos em preenchimento).
+  // Vive no estado salvo — não some ao trocar de aba nem ao recarregar o app.
+  const draft = useMemo(() => normalizeDraft((state.rascunhos || {})[selectedDate]), [state.rascunhos, selectedDate]);
+  // fn recebe { day, draft } do estado mais recente e devolve { day?, draft? } para gravar juntos.
+  const updateRegistro = useCallback((fn) => commitWith((prev) => {
+    const date = selectedDate;
+    const res = fn({ day: prev.logs[date] || emptyDay(date), draft: normalizeDraft((prev.rascunhos || {})[date]) }) || {};
+    let next = prev;
+    if (res.day) next = { ...next, logs: { ...next.logs, [date]: res.day } };
+    if (res.draft) next = { ...next, rascunhos: setDraftFor(next.rascunhos, date, res.draft) };
+    return next;
+  }), [selectedDate, commitWith]);
+  const lastLoads = useMemo(() => lastLoadsUntil(logs, selectedDate), [logs, selectedDate]);
+  const suggestedTreino = useMemo(() => suggestNextTreino(logs, selectedDate, currentPlan?.sessoes), [logs, selectedDate, currentPlan]);
+
   const sortedDates = useMemo(() => Object.keys(logs).sort(), [logs]);
 
   const streak = useMemo(() => {
@@ -522,6 +541,9 @@ export default function FitLog({ userId, onLogout, userEmail }) {
               macroResult={macroResult} weightDate={latestWeight?.date}
               onGoToAssessment={() => setTab("avaliacao")}
               saveStatus={saveStatus} onSave={saveNow}
+              draft={draft} updateRegistro={updateRegistro}
+              plan={currentPlan} pStatus={pStatus} lastLoads={lastLoads} suggestedTreino={suggestedTreino}
+              onGoToPlan={() => setTab("plano")}
             />
           )}
           {tab === "avaliacao" && (
@@ -556,36 +578,88 @@ export default function FitLog({ userId, onLogout, userEmail }) {
 // ---------------------------------------------------------------------------
 // Registro
 // ---------------------------------------------------------------------------
-function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, macroResult, weightDate, onGoToAssessment, saveStatus, onSave }) {
-  const [exerciseList, setExerciseList] = useState([]);
-  const [exerciseDraft, setExerciseDraft] = useState({ nome: "", carga_kg: "", esquema: "" });
-  const [sessionDraft, setSessionDraft] = useState({ duracao: "", hr_avg: "", hr_max: "", calorias: "", rpe: "7" });
-  const [cardioDraft, setCardioDraft] = useState({ tipo: "corrida", duracao: "", hr_avg: "", hr_max: "", pace: "", calorias: "", rpe: "6" });
+function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassifyExercise, macroResult, weightDate, onGoToAssessment, saveStatus, onSave,
+  draft, updateRegistro, plan, pStatus, lastLoads, suggestedTreino, onGoToPlan }) {
+  const { exerciseList, exerciseDraft, sessionDraft, cardioDraft } = draft;
   const [showMedidas, setShowMedidas] = useState(false);
+  const formRef = useRef(null);
+  const cargaRef = useRef(null);
   // a seção abre sozinha quando o dia selecionado já tem alguma medida lançada
   const medidasAbertas = showMedidas || Object.values(day.medidas || {}).some((v) => v !== "" && v != null);
 
-  const addExercise = () => {
-    if (!exerciseDraft.nome.trim()) return;
-    setExerciseList([...exerciseList, { id: uid(), ...exerciseDraft }]);
-    onClassifyExercise?.(exerciseDraft.nome.trim());
-    setExerciseDraft({ nome: "", carga_kg: "", esquema: exerciseDraft.esquema });
+  // Ficha do plano (A/B/C…) disponível aqui mesmo, sem ir à aba Plano
+  const sessoes = plan?.sessoes || [];
+  const phaseIdx = pStatus ? currentPhaseIndex(plan?.fases || [], pStatus.semanaAtual) : 0;
+  const fase = (plan?.fases || [])[phaseIdx];
+  const treinoSel = draft.treino ?? suggestedTreino;
+  const sessaoSel = sessoes.find((x) => x.id === treinoSel) || null;
+  const prescricao = (nome) => {
+    const hit = findInPlan(sessoes, nome);
+    if (!hit) return "";
+    const reps = repsFor(hit.ex, phaseIdx);
+    return `${hit.ex.series ? `${hit.ex.series} × ` : ""}${reps}${hit.ex.descanso_s ? ` · desc. ${hit.ex.descanso_s}s` : ""}`;
   };
-  const removeExercise = (id) => setExerciseList(exerciseList.filter((e) => e.id !== id));
+  const feitosHoje = useMemo(() => new Set([
+    ...exerciseList.map((e) => exerciseKey(e.nome)),
+    ...(day.strengthWorkouts || []).flatMap((s) => (s.exercicios || []).map((e) => exerciseKey(e.nome))),
+  ]), [exerciseList, day.strengthWorkouts]);
+
+  // grava um campo do rascunho a partir do estado mais recente (não perde teclas)
+  const setField = (group, field, value) => updateRegistro(({ draft: d }) => ({ draft: { ...d, [group]: { ...d[group], [field]: value } } }));
+  const chooseTreino = (id) => updateRegistro(({ draft: d }) => ({ draft: { ...d, treino: id } }));
+
+  const pickFromPlan = (ex) => {
+    const last = lastLoads[exerciseKey(ex.nome)];
+    updateRegistro(({ draft: d }) => ({
+      draft: { ...d, treino: treinoSel, exerciseDraft: { nome: ex.nome, carga_kg: last ? last.carga : "", esquema: esquemaFromPlan(ex, phaseIdx) } },
+    }));
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    cargaRef.current?.focus({ preventScroll: true });
+  };
+
+  const addExercise = () => {
+    const nome = exerciseDraft.nome.trim();
+    if (!nome) return;
+    const presc = prescricao(nome);
+    updateRegistro(({ draft: d }) => ({
+      draft: {
+        ...d,
+        exerciseList: [...d.exerciseList, { id: uid(), nome, carga_kg: d.exerciseDraft.carga_kg, esquema: d.exerciseDraft.esquema, ...(presc ? { prescrito: presc } : {}) }],
+        exerciseDraft: { nome: "", carga_kg: "", esquema: d.exerciseDraft.esquema },
+      },
+    }));
+    onClassifyExercise?.(nome);
+  };
+  const removeExercise = (id) => updateRegistro(({ draft: d }) => ({ draft: { ...d, exerciseList: d.exerciseList.filter((e) => e.id !== id) } }));
   const saveStrengthSession = () => {
     if (exerciseList.length === 0) return;
-    const session = { id: uid(), exercicios: exerciseList, duracao: n(sessionDraft.duracao), hr_avg: n(sessionDraft.hr_avg), hr_max: n(sessionDraft.hr_max), calorias: n(sessionDraft.calorias), rpe: n(sessionDraft.rpe) };
-    updateDay({ strengthWorkouts: [...(day.strengthWorkouts || []), session] });
-    setExerciseList([]);
-    setSessionDraft({ duracao: "", hr_avg: "", hr_max: "", calorias: "", rpe: "7" });
+    updateRegistro(({ day: dd, draft: d }) => {
+      if (!d.exerciseList.length) return {};
+      const sd = d.sessionDraft;
+      const usouPlano = d.exerciseList.some((e) => e.prescrito);
+      const session = {
+        id: uid(), exercicios: d.exerciseList, duracao: n(sd.duracao), hr_avg: n(sd.hr_avg), hr_max: n(sd.hr_max), calorias: n(sd.calorias), rpe: n(sd.rpe),
+        ...(usouPlano && (d.treino ?? suggestedTreino) ? { treino: d.treino ?? suggestedTreino } : {}),
+      };
+      return {
+        day: { ...dd, strengthWorkouts: [...(dd.strengthWorkouts || []), session] },
+        draft: { ...d, treino: null, exerciseList: [], exerciseDraft: emptyDraft().exerciseDraft, sessionDraft: emptyDraft().sessionDraft },
+      };
+    });
   };
   const removeStrengthSession = (id) => updateDay({ strengthWorkouts: (day.strengthWorkouts || []).filter((s) => s.id !== id) });
 
   const saveCardioSession = () => {
     if (!cardioDraft.duracao) return;
-    const session = { id: uid(), tipo: cardioDraft.tipo, duracao: n(cardioDraft.duracao), hr_avg: n(cardioDraft.hr_avg), hr_max: n(cardioDraft.hr_max), pace: cardioDraft.pace, calorias: n(cardioDraft.calorias), rpe: n(cardioDraft.rpe) };
-    updateDay({ cardioWorkouts: [...(day.cardioWorkouts || []), session] });
-    setCardioDraft({ tipo: cardioDraft.tipo, duracao: "", hr_avg: "", hr_max: "", pace: "", calorias: "", rpe: "6" });
+    updateRegistro(({ day: dd, draft: d }) => {
+      const c = d.cardioDraft;
+      if (!c.duracao) return {};
+      const session = { id: uid(), tipo: c.tipo, duracao: n(c.duracao), hr_avg: n(c.hr_avg), hr_max: n(c.hr_max), pace: c.pace, calorias: n(c.calorias), rpe: n(c.rpe) };
+      return {
+        day: { ...dd, cardioWorkouts: [...(dd.cardioWorkouts || []), session] },
+        draft: { ...d, cardioDraft: { ...emptyDraft().cardioDraft, tipo: c.tipo } },
+      };
+    });
   };
   const removeCardioSession = (id) => updateDay({ cardioWorkouts: (day.cardioWorkouts || []).filter((c) => c.id !== id) });
 
@@ -646,6 +720,7 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
             <div key={s.id} style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "10px 12px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                 <div style={{ fontSize: 11.5, color: COLORS.textMid }}>
+                  {s.treino ? <b style={{ color: COLORS.teal, marginRight: 6 }}>Treino {s.treino}</b> : null}
                   {s.duracao ? `${s.duracao} min` : ""}{s.hr_avg ? ` · FC média ${s.hr_avg} bpm` : ""}{s.hr_max ? ` · FC máx ${s.hr_max} bpm` : ""}{s.calorias ? ` · ${s.calorias} kcal` : ""}{s.rpe ? ` · RPE ${s.rpe}/10` : ""}
                 </div>
                 <IconButton onClick={() => removeStrengthSession(s.id)} danger title="Remover sessão"><Trash2 size={14} /></IconButton>
@@ -661,13 +736,25 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
             </div>
           ))}
 
-          <div style={{ background: COLORS.bg, border: `1px dashed ${COLORS.lineStrong}`, borderRadius: 4, padding: 12 }}>
-            <div style={{ fontSize: 12.5, color: COLORS.textMid, marginBottom: 8 }}>Adicionar exercícios à sessão</div>
+          {sessoes.length > 0 && (
+            <FichaDoDia sessoes={sessoes} treinoSel={treinoSel} sessao={sessaoSel} suggested={suggestedTreino}
+              phaseIdx={phaseIdx} fase={fase} expired={!!pStatus?.expired} lastLoads={lastLoads} feitos={feitosHoje}
+              onChoose={chooseTreino} onPick={pickFromPlan} onGoToPlan={onGoToPlan} />
+          )}
+
+          <div ref={formRef} style={{ background: COLORS.bg, border: `1px dashed ${COLORS.lineStrong}`, borderRadius: 4, padding: 12 }}>
+            <div style={{ fontSize: 12.5, color: COLORS.textMid, marginBottom: 8 }}>
+              Adicionar exercícios à sessão
+              {exerciseList.length > 0 && <span style={{ color: COLORS.textFaint }}> — rascunho guardado: pode trocar de aba à vontade</span>}
+            </div>
             {exerciseList.length > 0 && (
               <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 10 }}>
                 {exerciseList.map((ex) => (
                   <div key={ex.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
-                    <span style={{ flex: 1 }}>{ex.nome} — {ex.carga_kg ? `${ex.carga_kg} kg` : "peso corporal"}{ex.esquema ? ` · ${ex.esquema}` : ""}</span>
+                    <span style={{ flex: 1 }}>
+                      {ex.nome} — {ex.carga_kg ? `${ex.carga_kg} kg` : "peso corporal"}{ex.esquema ? ` · ${ex.esquema}` : ""}
+                      {(ex.prescrito || prescricao(ex.nome)) && <span style={{ display: "block", fontSize: 11.5, color: COLORS.textFaint }}>plano: {ex.prescrito || prescricao(ex.nome)}</span>}
+                    </span>
                     <IconButton onClick={() => removeExercise(ex.id)} danger title="Remover"><Trash2 size={13} /></IconButton>
                   </div>
                 ))}
@@ -675,22 +762,24 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
             )}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
               <Field label="Exercício" hint="digite livremente — o sistema identifica o grupo muscular sozinho">
-                <TextInput list="exercicios-comuns" placeholder="Nome do aparelho ou exercício…" value={exerciseDraft.nome} onChange={(e) => setExerciseDraft({ ...exerciseDraft, nome: e.target.value })} style={{ width: 190 }} />
+                <TextInput list="exercicios-comuns" placeholder="Nome do aparelho ou exercício…" value={exerciseDraft.nome} onChange={(e) => setField("exerciseDraft", "nome", e.target.value)} style={{ width: 190 }} />
               </Field>
-              <Field label="Carga (kg)"><TextInput type="number" step="0.5" placeholder="30" value={exerciseDraft.carga_kg} onChange={(e) => setExerciseDraft({ ...exerciseDraft, carga_kg: e.target.value })} style={{ width: 90 }} /></Field>
+              <Field label="Carga (kg)" hint={lastLoads[exerciseKey(exerciseDraft.nome)] ? `última: ${lastLoads[exerciseKey(exerciseDraft.nome)].carga} kg` : undefined}>
+                <input ref={cargaRef} type="number" inputMode="decimal" step="0.5" placeholder="30" value={exerciseDraft.carga_kg} onChange={(e) => setField("exerciseDraft", "carga_kg", e.target.value)} style={{ ...inputStyle, width: 90 }} />
+              </Field>
               <Field label="Esquema de séries">
-                <TextInput list="esquemas-comuns" placeholder="3x10-12" value={exerciseDraft.esquema} onChange={(e) => setExerciseDraft({ ...exerciseDraft, esquema: e.target.value })} style={{ width: 190 }} />
+                <TextInput list="esquemas-comuns" placeholder="3x10-12" value={exerciseDraft.esquema} onChange={(e) => setField("exerciseDraft", "esquema", e.target.value)} style={{ width: 190 }} />
               </Field>
               <GhostButton onClick={addExercise}><Plus size={14} /> Add. exercício</GhostButton>
             </div>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end", marginTop: 12, borderTop: `1px solid ${COLORS.line}`, paddingTop: 12 }}>
-              <Field label="Duração (min)"><TextInput type="number" placeholder="50" value={sessionDraft.duracao} onChange={(e) => setSessionDraft({ ...sessionDraft, duracao: e.target.value })} style={{ width: 90 }} /></Field>
-              <Field label="FC média (bpm)" hint="do relógio"><TextInput type="number" placeholder="120" value={sessionDraft.hr_avg} onChange={(e) => setSessionDraft({ ...sessionDraft, hr_avg: e.target.value })} style={{ width: 100 }} /></Field>
-              <Field label="FC máxima (bpm)"><TextInput type="number" placeholder="150" value={sessionDraft.hr_max} onChange={(e) => setSessionDraft({ ...sessionDraft, hr_max: e.target.value })} style={{ width: 100 }} /></Field>
-              <Field label="Calorias" hint="do relógio"><TextInput type="number" placeholder="350" value={sessionDraft.calorias} onChange={(e) => setSessionDraft({ ...sessionDraft, calorias: e.target.value })} style={{ width: 90 }} /></Field>
+              <Field label="Duração (min)"><TextInput type="number" placeholder="50" value={sessionDraft.duracao} onChange={(e) => setField("sessionDraft", "duracao", e.target.value)} style={{ width: 90 }} /></Field>
+              <Field label="FC média (bpm)" hint="do relógio"><TextInput type="number" placeholder="120" value={sessionDraft.hr_avg} onChange={(e) => setField("sessionDraft", "hr_avg", e.target.value)} style={{ width: 100 }} /></Field>
+              <Field label="FC máxima (bpm)"><TextInput type="number" placeholder="150" value={sessionDraft.hr_max} onChange={(e) => setField("sessionDraft", "hr_max", e.target.value)} style={{ width: 100 }} /></Field>
+              <Field label="Calorias" hint="do relógio"><TextInput type="number" placeholder="350" value={sessionDraft.calorias} onChange={(e) => setField("sessionDraft", "calorias", e.target.value)} style={{ width: 90 }} /></Field>
               <Field label="RPE (1-10)">
-                <Select value={sessionDraft.rpe} onChange={(e) => setSessionDraft({ ...sessionDraft, rpe: e.target.value })} style={{ width: 80 }}>
+                <Select value={sessionDraft.rpe} onChange={(e) => setField("sessionDraft", "rpe", e.target.value)} style={{ width: 80 }}>
                   {Array.from({ length: 10 }, (_, i) => i + 1).map((v) => <option key={v} value={v}>{v}</option>)}
                 </Select>
               </Field>
@@ -718,19 +807,19 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
           ))}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
             <Field label="Tipo">
-              <Select value={cardioDraft.tipo} onChange={(e) => setCardioDraft({ ...cardioDraft, tipo: e.target.value })} style={{ width: 120 }}>
+              <Select value={cardioDraft.tipo} onChange={(e) => setField("cardioDraft", "tipo", e.target.value)} style={{ width: 120 }}>
                 <option value="corrida">Corrida</option><option value="caminhada">Caminhada</option>
                 <option value="spinning">Spinning</option><option value="bicicleta">Bicicleta</option>
                 <option value="eliptico">Elíptico</option><option value="outro">Outro</option>
               </Select>
             </Field>
-            <Field label="Duração (min)"><TextInput type="number" placeholder="30" value={cardioDraft.duracao} onChange={(e) => setCardioDraft({ ...cardioDraft, duracao: e.target.value })} style={{ width: 90 }} /></Field>
-            <Field label="Pace médio" hint="min/km"><TextInput placeholder="5:30" value={cardioDraft.pace} onChange={(e) => setCardioDraft({ ...cardioDraft, pace: e.target.value })} style={{ width: 90 }} /></Field>
-            <Field label="FC média (bpm)"><TextInput type="number" placeholder="145" value={cardioDraft.hr_avg} onChange={(e) => setCardioDraft({ ...cardioDraft, hr_avg: e.target.value })} style={{ width: 100 }} /></Field>
-            <Field label="FC máxima (bpm)"><TextInput type="number" placeholder="170" value={cardioDraft.hr_max} onChange={(e) => setCardioDraft({ ...cardioDraft, hr_max: e.target.value })} style={{ width: 100 }} /></Field>
-            <Field label="Calorias"><TextInput type="number" placeholder="280" value={cardioDraft.calorias} onChange={(e) => setCardioDraft({ ...cardioDraft, calorias: e.target.value })} style={{ width: 90 }} /></Field>
+            <Field label="Duração (min)"><TextInput type="number" placeholder="30" value={cardioDraft.duracao} onChange={(e) => setField("cardioDraft", "duracao", e.target.value)} style={{ width: 90 }} /></Field>
+            <Field label="Pace médio" hint="min/km"><TextInput placeholder="5:30" value={cardioDraft.pace} onChange={(e) => setField("cardioDraft", "pace", e.target.value)} style={{ width: 90 }} /></Field>
+            <Field label="FC média (bpm)"><TextInput type="number" placeholder="145" value={cardioDraft.hr_avg} onChange={(e) => setField("cardioDraft", "hr_avg", e.target.value)} style={{ width: 100 }} /></Field>
+            <Field label="FC máxima (bpm)"><TextInput type="number" placeholder="170" value={cardioDraft.hr_max} onChange={(e) => setField("cardioDraft", "hr_max", e.target.value)} style={{ width: 100 }} /></Field>
+            <Field label="Calorias"><TextInput type="number" placeholder="280" value={cardioDraft.calorias} onChange={(e) => setField("cardioDraft", "calorias", e.target.value)} style={{ width: 90 }} /></Field>
             <Field label="RPE (1-10)">
-              <Select value={cardioDraft.rpe} onChange={(e) => setCardioDraft({ ...cardioDraft, rpe: e.target.value })} style={{ width: 80 }}>
+              <Select value={cardioDraft.rpe} onChange={(e) => setField("cardioDraft", "rpe", e.target.value)} style={{ width: 80 }}>
                 {Array.from({ length: 10 }, (_, i) => i + 1).map((v) => <option key={v} value={v}>{v}</option>)}
               </Select>
             </Field>
@@ -742,9 +831,91 @@ function RegistroTab({ selectedDate, setSelectedDate, day, updateDay, onClassify
       <SaveBar
         status={saveStatus} onSave={onSave}
         warning={exerciseList.length > 0
-          ? "Você tem exercícios ainda fora de uma sessão: clique em \"Salvar sessão\" no treino de força."
-          : (cardioDraft.duracao ? "Há um cardio preenchido ainda não salvo: clique em \"Salvar\" no treino cardiovascular." : "")}
+          ? `${exerciseList.length} exercício${exerciseList.length > 1 ? "s" : ""} em rascunho (guardado, não some ao trocar de aba). Ao terminar o treino, toque em "Salvar sessão" para ele contar no histórico.`
+          : (cardioDraft.duracao ? "Cardio em rascunho (guardado). Toque em \"Salvar\" no treino cardiovascular para ele contar no histórico." : "")}
       />
+    </div>
+  );
+}
+
+// Ficha do plano dentro do Registro: escolha o treino do dia e toque no exercício
+// para preencher o formulário (nome, esquema da fase atual e a última carga usada).
+function FichaDoDia({ sessoes, treinoSel, sessao, suggested, phaseIdx, fase, expired, lastLoads, feitos, onChoose, onPick, onGoToPlan }) {
+  const [aberta, setAberta] = useState(true);
+  const feitosNaSessao = sessao ? sessao.exercicios.filter((e) => feitos.has(exerciseKey(e.nome))).length : 0;
+  return (
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: "12px 12px 6px" }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <ClipboardList size={15} color={COLORS.teal} />
+          <span style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: 14, fontWeight: 600 }}>Ficha do dia</span>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {sessoes.map((x) => {
+            const on = x.id === treinoSel;
+            return (
+              <button key={x.id} onClick={() => onChoose(x.id)} title={x.foco} style={{
+                minWidth: 40, padding: "6px 10px", borderRadius: 4, cursor: "pointer", fontSize: 13, fontWeight: 600,
+                fontFamily: "'Space Grotesk', sans-serif",
+                background: on ? COLORS.teal : "transparent", color: on ? "#0B1614" : COLORS.textMid,
+                border: `1px solid ${on ? COLORS.teal : COLORS.lineStrong}`,
+              }}>{x.id}</button>
+            );
+          })}
+        </div>
+      </div>
+      {sessao && (
+        <>
+          <div style={{ fontSize: 12.5, color: COLORS.textMid, marginTop: 8, lineHeight: 1.45 }}>
+            <b style={{ color: COLORS.textHi }}>Treino {sessao.id} — {sessao.foco}</b>
+            {sessao.id === suggested ? <span style={{ color: COLORS.teal }}> · próximo da sequência</span> : null}
+            {fase ? <span> · repetições da fase {phaseIdx + 1} ({fase.nome})</span> : null}
+            {feitosNaSessao > 0 ? <span> · {feitosNaSessao}/{sessao.exercicios.length} lançados</span> : null}
+          </div>
+          {expired && <div style={{ fontSize: 12, color: COLORS.amber, marginTop: 4 }}>Esta ficha venceu — você pode continuar usando enquanto não gera uma nova.</div>}
+          {aberta && (
+            <div style={{ display: "flex", flexDirection: "column", marginTop: 6 }}>
+              {sessao.exercicios.map((ex, j) => {
+                const feito = feitos.has(exerciseKey(ex.nome));
+                const last = lastLoads[exerciseKey(ex.nome)];
+                return (
+                  <button key={`${j}-${ex.nome}`} onClick={() => onPick(ex)} style={{
+                    display: "flex", gap: 10, alignItems: "flex-start", textAlign: "left", width: "100%",
+                    background: "transparent", border: "none", borderTop: j ? `1px solid ${COLORS.line}` : "none",
+                    padding: "9px 2px", cursor: "pointer", color: COLORS.textHi,
+                  }}>
+                    <span style={{
+                      width: 22, height: 22, borderRadius: 11, flexShrink: 0, marginTop: 1, display: "flex", alignItems: "center", justifyContent: "center",
+                      background: feito ? COLORS.teal : "transparent", border: `1px solid ${feito ? COLORS.teal : COLORS.lineStrong}`,
+                      color: feito ? "#0B1614" : COLORS.textMid, fontSize: 11, fontWeight: 600,
+                    }}>{feito ? <Check size={13} /> : j + 1}</span>
+                    <span style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 13.5, color: feito ? COLORS.textMid : COLORS.textHi }}>{ex.nome}</span>
+                        <span style={{ fontSize: 13, fontFamily: "'Space Grotesk', sans-serif", whiteSpace: "nowrap" }}>
+                          {ex.series ? `${ex.series} × ` : ""}{repsFor(ex, phaseIdx)}
+                          {ex.descanso_s ? <span style={{ color: COLORS.textMid }}> · {ex.descanso_s}s</span> : null}
+                        </span>
+                      </span>
+                      {ex.tecnica && <span style={{ display: "block", fontSize: 11.5, color: COLORS.amber, marginTop: 2, lineHeight: 1.4 }}>Técnica: {ex.tecnica}</span>}
+                      {ex.pegada && <span style={{ display: "block", fontSize: 11.5, color: COLORS.textMid, marginTop: 2, lineHeight: 1.4 }}>Pegada: {ex.pegada}</span>}
+                      <span style={{ display: "block", fontSize: 11.5, color: COLORS.textFaint, marginTop: 2 }}>
+                        {last ? `Última carga: ${last.carga} kg (${fmtDate(last.date)})` : (ex.carga_sugerida || "Toque para preencher")}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+      <div style={{ display: "flex", gap: 16, padding: "6px 0 4px", flexWrap: "wrap" }}>
+        <button onClick={() => setAberta(!aberta)} style={{ ...linkBtn, display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {aberta ? <ChevronUp size={13} /> : <ChevronDown size={13} />}{aberta ? "Recolher ficha" : "Mostrar exercícios"}
+        </button>
+        <button onClick={onGoToPlan} style={{ ...linkBtn, color: COLORS.textMid }}>Ver ficha completa</button>
+      </div>
     </div>
   );
 }
@@ -993,6 +1164,7 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
   const currentIdx = status ? currentPhaseIndex(phases, status.semanaAtual) : 0;
   const [phaseSel, setPhaseSel] = useState(null);
   const phaseIdx = Math.min(phaseSel ?? currentIdx, Math.max(phases.length - 1, 0));
+  const [exportOpen, setExportOpen] = useState(false);
 
   if (!hasAssessment && !plan) {
     return (
@@ -1011,11 +1183,17 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
     <div style={{ display: "flex", flexDirection: "column", gap: 22, maxWidth: 680 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
         <SectionTitle icon={Target} title="Plano atual" />
-        <PrimaryButton onClick={onRegenerate} disabled={loading}>
-          {loading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={15} />}
-          {loading ? "Montando a ficha…" : "Gerar nova ficha"}
-        </PrimaryButton>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {plan && !legacy && <GhostButton onClick={() => setExportOpen(!exportOpen)}><Download size={14} />Exportar</GhostButton>}
+          <PrimaryButton onClick={onRegenerate} disabled={loading}>
+            {loading ? <Loader2 size={15} style={{ animation: "spin 1s linear infinite" }} /> : <RefreshCw size={15} />}
+            {loading ? "Montando a ficha…" : "Gerar nova ficha"}
+          </PrimaryButton>
+        </div>
       </div>
+      {exportOpen && plan && !legacy && (
+        <ExportPanel plan={plan} status={status} phaseIdx={phaseIdx} phase={phases[phaseIdx]} onClose={() => setExportOpen(false)} />
+      )}
       {loading && <div style={{ fontSize: 12, color: COLORS.textMid, marginTop: -12 }}>A ficha completa leva de 1 a 3 minutos. Mantenha o app aberto.</div>}
 
       {error && <div style={{ border: `1px solid #5C332E`, background: COLORS.redSoft, borderRadius: 4, padding: "10px 12px", fontSize: 13, color: "#E8A79A" }}>{error}</div>}
@@ -1145,6 +1323,51 @@ function PlanoTab({ plan, loading, error, onRegenerate, hasAssessment, onGoToAss
           <div style={{ fontSize: 11, color: COLORS.textFaint }}>Gerado em {new Date(plan.generatedAt).toLocaleString("pt-BR")}</div>
         </>
       )}
+    </div>
+  );
+}
+
+function ExportPanel({ plan, status, phaseIdx, phase, onClose }) {
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+  // o gerador de PDF/imagem só é baixado quando este painel abre (deixa o app mais leve)
+  const [mod, setMod] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    import("../lib/fichaExport").then((m) => alive && setMod(m)).catch(() => alive && setMsg("Não foi possível carregar o exportador. Verifique a internet."));
+    return () => { alive = false; };
+  }, []);
+  // sem await antes do compartilhamento: o iPhone exige que ele siga direto o toque
+  const run = (fn, label) => {
+    setBusy(true); setMsg("");
+    let p;
+    try { p = fn(plan, { phaseIdx, status }); } catch (e) { setBusy(false); setMsg(`Não foi possível gerar ${label}: ${e?.message || "erro"}`); return; }
+    p.then((r) => setMsg(r === "downloaded" ? `${label[0].toUpperCase()}${label.slice(1)} baixado${label.endsWith("s") ? "s" : ""}.` : r === "shared" ? "Pronto." : ""))
+      .catch((e) => setMsg(`Não foi possível compartilhar: ${e?.message || "erro"}`))
+      .finally(() => setBusy(false));
+  };
+  const card = { display: "flex", gap: 10, alignItems: "flex-start", textAlign: "left", width: "100%", background: COLORS.bg, border: `1px solid ${COLORS.lineStrong}`, borderRadius: 4, padding: "10px 12px", cursor: busy ? "default" : "pointer", color: COLORS.textHi };
+  return (
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.line}`, borderRadius: 4, padding: 14, marginTop: -8, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 12.5, color: COLORS.textMid, lineHeight: 1.5 }}>
+        Exporta a ficha {phase ? <>com as repetições da <b style={{ color: COLORS.textHi }}>fase {phaseIdx + 1} ({phase.nome})</b> — troque a fase em "Treinos" para exportar outra.</> : "atual."}
+        {" "}No iPhone, abre o compartilhamento: escolha <b style={{ color: COLORS.textHi }}>Salvar em Arquivos</b>, <b style={{ color: COLORS.textHi }}>Salvar imagem</b> ou <b style={{ color: COLORS.textHi }}>Imprimir</b>.
+      </div>
+      <button disabled={busy || !mod} onClick={() => run(mod.exportFichaPDF, "PDF")} style={{ ...card, opacity: mod ? 1 : 0.5 }}>
+        <FileText size={18} color={COLORS.teal} style={{ flexShrink: 0, marginTop: 1 }} />
+        <span><span style={{ display: "block", fontSize: 13.5, fontWeight: 600 }}>PDF da ficha completa</span>
+          <span style={{ display: "block", fontSize: 12, color: COLORS.textMid, marginTop: 2 }}>Folha A4 com todos os treinos, fases, cardio e progressão. Bom para imprimir.</span></span>
+      </button>
+      <button disabled={busy || !mod} onClick={() => run(mod.exportFichaImages, "imagens")} style={{ ...card, opacity: mod ? 1 : 0.5 }}>
+        <ImageIcon size={18} color={COLORS.teal} style={{ flexShrink: 0, marginTop: 1 }} />
+        <span><span style={{ display: "block", fontSize: 13.5, fontWeight: 600 }}>Imagens para o celular</span>
+          <span style={{ display: "block", fontSize: 12, color: COLORS.textMid, marginTop: 2 }}>Uma imagem por treino ({(plan.sessoes || []).map((x) => x.id).join(", ")}), no tamanho da tela. Fica na galeria de fotos.</span></span>
+      </button>
+      <div style={{ display: "flex", gap: 14, alignItems: "center" }}>
+        {busy && <span style={{ fontSize: 12.5, color: COLORS.textMid, display: "flex", gap: 6, alignItems: "center" }}><Loader2 size={13} style={{ animation: "spin 1s linear infinite" }} />Gerando…</span>}
+        {msg && <span role="status" style={{ fontSize: 12.5, color: msg.startsWith("Não") ? COLORS.red : COLORS.teal }}>{msg}</span>}
+        <button onClick={onClose} style={{ ...linkBtn, color: COLORS.textMid, marginLeft: "auto" }}>Fechar</button>
+      </div>
     </div>
   );
 }

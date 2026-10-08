@@ -115,6 +115,12 @@ Um seletor de período (30 dias, 90 dias, 1 ano, tudo) vale para todo o painel:
 7. **Progressão de carga** por exercício: a maior carga lançada em cada dia. Só entram exercícios com carga em kg.
 8. **Calorias por dia** contra a meta do plano. Dias do lixo e dias com só calorias totais têm cor própria e ficam fora das médias de calorias e proteína. Mostra no máximo 90 dias.
 
+## Ficha do dia, rascunho e exportação
+
+- **Ficha do dia (aba Registro):** escolha o treino (A, B, C…). O app sugere o próximo da sequência. Toque num exercício para preencher nome, esquema da fase atual e a última carga usada; ajuste a carga e toque em "Add. exercício". Os exercícios já lançados ficam marcados.
+- **Rascunho que não some:** o que está em preenchimento (exercícios ainda fora de uma sessão, campos digitados, cardio) fica guardado por data no banco (`rascunhos` dentro do `app_state`). Trocar de aba, recarregar ou fechar o app não apaga nada. "Salvar sessão" continua sendo o que faz o treino contar no histórico, nos gráficos e na validade da ficha.
+- **Exportar (aba Plano):** "PDF da ficha completa" gera uma folha A4, e "Imagens para o celular" gera uma imagem por treino. Os dois usam as repetições da fase selecionada em "Treinos". No iPhone, abre a folha de compartilhamento (Salvar em Arquivos, Salvar imagem, Imprimir). No computador, o arquivo é baixado.
+
 ## Por que essa arquitetura
 
 - **Nada obrigatório de campo**: mantido do protótipo original — todo dado é opcional, dias sem peso/treino/comida continuam funcionando.

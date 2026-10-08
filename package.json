@@ -7,10 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node tests/nutrition.test.mjs && node tests/planStatus.test.mjs && node tests/analytics.test.mjs && node tests/background.test.mjs"
+    "test": "node tests/nutrition.test.mjs && node tests/planStatus.test.mjs && node tests/analytics.test.mjs && node tests/background.test.mjs && node tests/registroDraft.test.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
+    "jspdf": "^2.5.2",
     "lucide-react": "^0.445.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
